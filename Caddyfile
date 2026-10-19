@@ -1,0 +1,16 @@
+# Caddyfile for Sewa Setu Production Deployment with HTTPS
+# Set DOMAIN environment variable (e.g., sewasetu.example.com or duckdns domain)
+{$DOMAIN:localhost} {
+    # Route RFC 9728 discovery and MCP endpoints to the MCP server
+    handle /.well-known/oauth-protected-resource* {
+        reverse_proxy mcp:8010
+    }
+    handle /mcp/* {
+        reverse_proxy mcp:8010
+    }
+
+    # Route all portal web routes, OAuth 2.1, and /eval-dashboard to app
+    handle {
+        reverse_proxy app:8000
+    }
+}
