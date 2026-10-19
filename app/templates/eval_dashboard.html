@@ -22,16 +22,16 @@
 
 <div class="eval-header">
   <h2>Sewa Setu — Persona Evaluation Dashboard</h2>
-  <p class="note">Automated evaluations of Citizen and Officer MCP servers across realistic personas and boundary test cases.</p>
+  <p class="note">Automated multi-tier evaluation of Citizen and Officer MCP servers across realistic personas and boundary test cases.</p>
 </div>
 
 <div class="eval-stats">
   <div class="stat-card">
     <div class="stat-num">{{ data.total_personas }}</div>
-    <div class="stat-label">Total Personas Evaluated</div>
+    <div class="stat-label">Deterministic Protocol Checks</div>
   </div>
   <div class="stat-card">
-    <div class="stat-num" style="color: #166534;">{{ data.total_passed }}</div>
+    <div class="stat-num" style="color: #166534;">{{ data.total_passed }}/{{ data.total_personas }}</div>
     <div class="stat-label">Passed</div>
   </div>
   <div class="stat-card">
@@ -43,6 +43,16 @@
     <div class="stat-label">Last Evaluation Run</div>
   </div>
 </div>
+
+{% if data.llm_evaluations %}
+<div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 14px 18px; margin-bottom: 24px;">
+  <div style="font-weight: bold; color: #166534; margin-bottom: 4px;">Tier 2: Headless LLM Agent Evaluation (Claude Code / Haiku)</div>
+  <div style="font-size: 13px; color: #1e3a8a;">
+    Engine: <code>{{ data.llm_evaluations.engine }}</code> &middot; Status: <b>{{ data.llm_evaluations.status }}</b>
+    <div style="color: #475569; margin-top: 4px;">{{ data.llm_evaluations.message }}</div>
+  </div>
+</div>
+{% endif %}
 
 <h3>Evaluated Personas & Scenarios</h3>
 

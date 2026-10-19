@@ -59,6 +59,9 @@ def get_public_keys_from_db():
         return {}
 
 
+JWT_PUBLIC_KEYS_OVERRIDE = None
+
+
 def verify_token(token, expected_resource, expected_role=None, public_keys=None):
     """
     Verify RS256 JWT access token.
@@ -75,7 +78,7 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
 
     kid = unverified_headers.get("kid")
     if public_keys is None:
-        public_keys = get_public_keys_from_db()
+        public_keys = JWT_PUBLIC_KEYS_OVERRIDE if JWT_PUBLIC_KEYS_OVERRIDE is not None else get_public_keys_from_db()
 
     pub_key = public_keys.get(kid) if kid else None
     if not pub_key and public_keys:
@@ -118,15 +121,23 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
     return True, claims
 
 
-def get_protected_resource_metadata(resource_path):
+def get_protected_resource_metadata(resource_path=""):
     """RFC 9728 Protected Resource Metadata document for an endpoint."""
     base_url = get_public_base_url()
-    canonical_resource = base_url + resource_path
-    scope = "officer" if "officer" in resource_path else "citizen"
+    if not resource_path or resource_path == "/":
+        canonical_resource = base_url
+        scopes = ["citizen", "officer"]
+    elif "officer" in resource_path:
+        canonical_resource = base_url + resource_path
+        scopes = ["officer"]
+    else:
+        canonical_resource = base_url + resource_path
+        scopes = ["citizen"]
+
     return {
         "resource": canonical_resource,
         "authorization_servers": [base_url],
-        "scopes_supported": [scope],
+        "scopes_supported": scopes,
         "bearer_methods_supported": ["header"],
         "resource_documentation": base_url + "/about"
     }

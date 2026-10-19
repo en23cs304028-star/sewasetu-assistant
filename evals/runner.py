@@ -345,14 +345,31 @@ def run_evals():
             "id": pid,
             "name": pname,
             "persona_type": ptype,
+            "tier": "deterministic_protocol_assertion",
             "passed": persona_passed,
             "checks": checks,
             "transcript": transcript,
             "what_changed_because_of_eval": CHANGES_LOG.get(pid, "Standardized validation behavior.")
         })
 
+    import claude_harness
+    claude_ready, claude_status_msg = claude_harness.check_claude_availability()
+
     summary = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "evaluation_tier": "two_tier",
+        "deterministic_checks": {
+            "total": len(personas),
+            "passed": total_passed,
+            "pass_rate_pct": round((total_passed / len(personas)) * 100, 1),
+            "description": "Deterministic protocol, schema, database boundary, and SLA rule assertions"
+        },
+        "llm_evaluations": {
+            "engine": "Claude Code Headless (--model haiku --max-turns 10)",
+            "status": "READY" if claude_ready else "PENDING_CREDENTIALS",
+            "message": claude_status_msg,
+            "description": "Multi-turn LLM agent evaluation over live streamable HTTP MCP endpoint"
+        },
         "total_personas": len(personas),
         "total_passed": total_passed,
         "pass_rate_pct": round((total_passed / len(personas)) * 100, 1),
@@ -363,7 +380,18 @@ def run_evals():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False, default=str)
 
-    print(f"\nEvaluation Complete! Passed: {total_passed}/{len(personas)} ({summary['pass_rate_pct']}%)")
+    # Also update app/evals/results.json so container has it
+    app_eval_path = os.path.join(BASE_DIR, "app", "evals", "results.json")
+    try:
+        os.makedirs(os.path.dirname(app_eval_path), exist_ok=True)
+        with open(app_eval_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
+    print(f"\nEvaluation Complete!")
+    print(f"Tier 1 (Deterministic Protocol Checks): {total_passed}/{len(personas)} ({summary['pass_rate_pct']}%)")
+    print(f"Tier 2 (Claude Code Headless Agent): {summary['llm_evaluations']['status']} - {claude_status_msg}")
     print(f"Results written to: {out_path}")
     return summary
 

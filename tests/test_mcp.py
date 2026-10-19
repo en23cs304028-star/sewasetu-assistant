@@ -43,7 +43,11 @@ class TestMCPServers(unittest.TestCase):
 
     def setUp(self):
         self.app = server.app.test_client()
+        auth.JWT_PUBLIC_KEYS_OVERRIDE = self.keys_dict
         citizen.DRAFTS.clear()
+
+    def tearDown(self):
+        auth.JWT_PUBLIC_KEYS_OVERRIDE = None
 
     def mint_token(self, subject, role, audience, exp_offset=1200):
         now = int(time.time())
@@ -64,7 +68,7 @@ class TestMCPServers(unittest.TestCase):
     # -----------------------------------------------------------------------
 
     def test_rfc9728_discovery(self):
-        resp = self.app.get("/.well-known/oauth-protected-resource")
+        resp = self.app.get("/.well-known/oauth-protected-resource/mcp/citizen")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertIn("authorization_servers", data)

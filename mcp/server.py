@@ -206,8 +206,13 @@ def authenticate_request(role, endpoint_path):
 @app.route("/.well-known/oauth-protected-resource", methods=["GET"])
 @app.route("/.well-known/oauth-protected-resource/<path:subpath>", methods=["GET"])
 def protected_resource_metadata(subpath=""):
-    resource_path = "/" + subpath if subpath else "/mcp/citizen"
-    doc = auth.get_protected_resource_metadata(resource_path)
+    resource_param = request.args.get("resource")
+    if resource_param:
+        from urllib.parse import urlparse
+        path = urlparse(resource_param).path
+    else:
+        path = "/" + subpath if subpath else ""
+    doc = auth.get_protected_resource_metadata(path)
     return jsonify(doc)
 
 

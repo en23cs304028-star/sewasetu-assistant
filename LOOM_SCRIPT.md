@@ -6,62 +6,65 @@
 
 ---
 
-### [00:00 - 00:30] Introduction & Architecture Overview (30s)
-- **On Screen:** Split screen showing the Sewa Setu Portal homepage (`http://localhost:8000`) on the left and the MCP endpoint discovery document (`/.well-known/oauth-protected-resource`) on the right.
+### [00:00 - 00:30] Introduction & Unified Architecture (30s)
+- **On Screen:** Split screen showing the Sewa Setu Portal homepage on the left and the RFC 9728 discovery endpoint (`/.well-known/oauth-protected-resource`) on the right.
 - **Spoken Audio:**
-  > "Namaste and welcome. This is the Sewa Setu Assistant—an AI-driven interface for Assam's Old Age Pension Scheme.
-  > Instead of bolting on an isolated chatbot with duplicated validation rules, we engineered two streamable Model Context Protocol servers: one for Citizens, exposing six conversational tools, and one for Block Officers, exposing five triage tools.
-  > Both channels share a single source of truth in `app/services.py`, with zero Flask dependencies, authenticated via RFC 9728 OAuth 2.1 Bearer tokens. Let's look at how this works in practice."
+  > "Namaste. This is the Sewa Setu Assistant—an AI-enabled interface for Assam's Old Age Pension Scheme.
+  > Instead of bolting on an isolated chatbot with duplicated business logic, we engineered two streamable Model Context Protocol servers: Citizen MCP with six tools and Officer MCP with five tools.
+  > Both channels share a single authoritative Python domain module in `app/services.py`, with zero Flask dependencies. Whether an application comes through the web portal or through an LLM agent, it runs through the exact same validation and state pipeline."
 
 ---
 
-### [00:30 - 01:00] Citizen Journey & Server-Side Confirmation (30s)
-- **On Screen:** Terminal or Claude Code client executing the Citizen flow for Sundari Bai (Persona 01). Show `prepare_application` returning a preview and confirmation token, followed by `submit_application(confirmation_token)`.
+### [00:30 - 01:00] Citizen Journey & Server-Side Confirmation Tokens (30s)
+- **On Screen:** Terminal running `python3 -m unittest tests/test_http_mcp.py` showing wire-level JSON-RPC calls over real HTTP: `initialize`, `tools/list`, and `tools/call`.
 - **Spoken Audio:**
-  > "Here is our Citizen flow in action. Notice how we avoid passing naive boolean flags like `confirmed_by_citizen=True`, which are vulnerable to hallucination and prompt injection.
-  > Instead, calling `prepare_application` performs dry-run validation and stores the draft server-side, returning a short-lived, single-use `confirmation_token` bound to a hash of that exact data.
-  > The assistant must read the preview and statutory declaration aloud to the citizen. Once confirmed, `submit_application` takes ONLY the token, writes the application, sends an immediate confirmation SMS via the gateway, and creates an immutable audit row."
+  > "Here is our wire-level JSON-RPC interaction over HTTP.
+  > Rather than relying on naive boolean flags like `confirmed_by_citizen=True`, which are vulnerable to hallucination and prompt injection, we implemented a server-side confirmation token pattern.
+  > When `prepare_application` runs, it dry-runs full validation and returns a 15-minute, single-use `confirmation_token` bound to a hash of that exact draft data.
+  > `submit_application` accepts only that token. The assistant physically cannot mutate data between citizen consent and final creation."
 
 ---
 
-### [01:00 - 01:30] Edge Cases & Data Traps (30s)
-- **On Screen:** Evaluation logs showing Persona 07 (Renu Ali - Boundary Age 60) and Persona 05 (Gopal Das - Duplicate Bank Account).
+### [01:00 - 01:30] Edge Cases & Seed Data Findings (30s)
+- **On Screen:** Code and test inspection of Persona 07 (Boundary Age 60) and Persona 05 (Shared Jan Dhan Bank Account).
 - **Spoken Audio:**
-  > "Real-world governance data contains subtle traps.
-  > First: boundary age. Renu Ali turned exactly 60 this year. Using naive day math or 365.25 calculations causes boundary errors on leap years; our calendar logic checks exact day and month boundaries against scheme rules.
-  > Second: duplicate bank accounts. In rural communities, elderly women frequently share a son's Jan Dhan account. Instead of rejecting these applications at the door, we allow submission and flag them as an informational warning for the reviewing officer."
+  > "Real governance data contains critical traps.
+  > First: boundary age. Renu Ali turned 60 this year. Using floating-point day math or dividing by 365.25 fails on leap years; our calendar logic checks exact day and month boundaries.
+  > Second: duplicate bank accounts. In rural communities, elderly women frequently share a son's Jan Dhan account. Rather than hard-rejecting these citizens at the door, our validator allows submission and flags the record for the reviewing officer."
 
 ---
 
-### [01:30 - 02:00] Officer MCP & Atomic Deemed Approval (30s)
-- **On Screen:** Terminal executing Officer MCP tools: `queue_summary`, `list_applications`, and `approve_application`. Show Postgres query verifying the audit row.
+### [01:30 - 02:00] Officer Workflow & Atomic Deemed Approval (30s)
+- **On Screen:** Officer queue triage showing `approve_application`, rejection requiring mandatory non-empty reason, and the atomic deemed approval SQL query.
 - **Spoken Audio:**
-  > "On the administrative side, the Officer MCP server lets block officers triage pending applications with statutory SLA visibility.
-  > Notice that decisions require non-empty notes on rejection to prevent unexplained denials.
-  > Furthermore, we fixed a critical audit race condition in the statutory 15-day deemed approval cron: using `UPDATE ... RETURNING id, application_no, mobile`, approvals and audit logs are committed atomically in the same transaction."
+  > "For block officers, the Officer MCP server enables SLA-aware queue triage.
+  > Rejections strictly mandate a recorded justification under natural justice principles.
+  > Furthermore, we resolved a critical race condition in the statutory 15-day deemed approval cron: using `UPDATE ... RETURNING id, application_no, mobile`, status transitions and audit log insertions commit atomically in a single transaction, eliminating audit trail drift."
 
 ---
 
-### [02:00 - 02:30] Evaluation Dashboard & 100% Pass Rate (30s)
-- **On Screen:** Web browser displaying the live `/eval-dashboard` route on the portal with 14/14 persona cards, pass rate statistics, and detailed execution transcripts.
+### [02:00 - 02:30] Two-Tier Evaluation Dashboard (30s)
+- **On Screen:** Web browser displaying the live `/eval-dashboard` route on the portal, showing Tier 1 Deterministic Protocol Checks and Tier 2 Headless Claude Code Agent status.
 - **Spoken Audio:**
   > "Here is our live evaluation dashboard at `/eval-dashboard`.
-  > We ran 14 end-to-end evaluations spanning conversational happy paths, underage rejections, withdrawn-then-reapplied lifecycles, adversarial prompt injection attempts, and kiosk session logouts.
-  > Every run asserts directly against PostgreSQL tables and SMS queues. All 14 test personas pass with 100% compliance, leaving the database completely clean."
+  > We maintain complete engineering honesty with a two-tier evaluation framework:
+  > Tier 1 executes 14 deterministic protocol and database boundary assertions—verifying schema rules, state transitions, prompt injection isolation, and kiosk session logouts with a 100% pass rate.
+  > Tier 2 integrates our headless Claude Code harness using Haiku with a 10-turn cap, testing multi-turn conversational agents over the real HTTP endpoint."
 
 ---
 
-### [02:30 - 03:00] The Tradeoff & Production Readiness (30s)
-- **On Screen:** Architecture diagram from `DESIGN-NOTE.md` and GitHub repository commit history (`git log --oneline`).
+### [02:30 - 03:00] Real Tradeoff & Production Deployment (30s)
+- **On Screen:** `Caddyfile`, `docker-compose.yml`, and GitHub repository commit log.
 - **Spoken Audio:**
-  > "If there's one architectural decision we would evolve in the next version, it would be adding an IVR phone bridge. Elderly rural citizens often speak local dialects and cannot type in English or Assamese; an IVR gateway connecting speech-to-text directly to our MCP tools would achieve universal accessibility.
-  > The code is fully modular, packaged with Docker Compose, tested with 33 unit tests, and pushed to our private GitHub repository.
-  > Thank you for watching."
+  > "If there's one technical decision we would change, it's abandoning stateful Server-Sent Events in favor of pure Stateless HTTP POST. Persistent SSE connections frequently break over rural 2G/3G mobile networks and cloud load balancers; stateless HTTP with confirmation tokens proved far more resilient.
+  > The system is fully containerized with Docker Compose and Caddy for HTTPS reverse proxying, tested with 39 unit and wire tests, and version-controlled on GitHub.
+  > Thank you for reviewing."
 
 ---
 
-### Quick Check & Demo Checklist for Recording
-1. `docker compose up` running (or `python app/app.py` on 8000 + `python mcp/server.py` on 8010).
-2. Browser tab 1: `http://localhost:8000/eval-dashboard`.
-3. Browser tab 2: `http://localhost:8000/admin/queue` (login: `admin` / `change-me-before-deploying`).
-4. Terminal ready with Claude Code or `python evals/runner.py`.
+### Demo Checklist Before Recording
+1. Start portal: `python3 app/app.py` (port 8000).
+2. Start MCP server: `python3 mcp/server.py` (port 8010).
+3. Browser Tab 1: `http://localhost:8000/eval-dashboard`.
+4. Browser Tab 2: `http://localhost:8000/admin/queue` (login: `admin` / `SewaSetu@Assam2026!Review`).
+5. Terminal: Run `python3 -m unittest discover tests` (39 tests pass).
