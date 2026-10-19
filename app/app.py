@@ -90,12 +90,10 @@ def hash_password(p):
     return hashlib.sha256(p.encode("utf-8")).hexdigest()
 
 
+import services
+
 def send_sms(mobile, text):
-    try:
-        requests.post(SMS_GATEWAY_URL + "/api/send",
-                      json={"to": mobile, "text": text}, timeout=5)
-    except Exception as e:
-        app.logger.error("sms gateway error: %s" % e)
+    services.send_sms(mobile, text, config)
 
 
 def deadline_remaining():
@@ -110,108 +108,27 @@ def new_application_no():
 
 
 def write_audit(cur, app_id, action, actor, note=""):
-    cur.execute("INSERT INTO audit_log (application_id, action, actor, note, at) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (app_id, action, actor, note, datetime.now()))
+    services.write_audit(cur, app_id, action, actor, note)
 
-
-# ---------------------------------------------------------------------------
-# Scheme rules: the single source of truth for what an application must satisfy.
-# Every channel that creates an application (the web form, any API, any batch
-# import) MUST go through validate_application() and create_application() so
-# that no channel admits an application another channel would refuse.
-# ---------------------------------------------------------------------------
 
 def parse_dob(raw):
-    try:
-        return datetime.strptime((raw or "").strip(), "%d/%m/%Y").date()
-    except ValueError:
-        return None
+    return services.parse_dob(raw)
 
 
 def age_on(dob, on):
-    return on.year - dob.year - ((on.month, on.day) < (dob.month, dob.day))
+    return services.age_on(dob, on)
 
 
 def validate_application(data, doc_path):
-    """Validate a complete application. Returns (errors, cleaned).
-
-    `errors` is a list of plain-language problems (empty when valid);
-    `cleaned` holds the normalised values ready for create_application().
-    """
-    errors = []
-    cleaned = {
-        "applicant_name": sanitize(data.get("applicant_name")),
-        "village": (data.get("village") or "").strip(),
-        "block": (data.get("block") or "").strip(),
-        "gender": data.get("gender") or "",
-        "marital_status": data.get("marital_status") or "",
-        "husband_name": (data.get("husband_name") or "").strip(),
-        "husband_employer": "",  # no longer collected (not a scheme requirement)
-        "bank_account": re.sub(r"[\s-]", "", data.get("bank_account") or ""),
-        "ifsc": re.sub(r"[\s-]", "", (data.get("ifsc") or "")).upper(),
-        "doc_path": doc_path or "",
-        "dob": None,
-    }
-    for label, key in (("full name", "applicant_name"), ("village", "village"),
-                       ("block", "block"), ("bank account", "bank_account")):
-        if not cleaned[key]:
-            errors.append("%s is required" % label)
-    if cleaned["block"] and cleaned["block"] not in BLOCKS:
-        errors.append("block must be one of: " + ", ".join(BLOCKS))
-    if cleaned["bank_account"] and not re.fullmatch(r"\d{9,18}", cleaned["bank_account"]):
-        errors.append("bank account number must be 9 to 18 digits")
-    if cleaned["ifsc"] and not re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", cleaned["ifsc"]):
-        errors.append("IFSC must be 11 characters, e.g. SBIN0003077")
-    dob = parse_dob(data.get("dob"))
-    if dob is None:
-        errors.append("date of birth must be given as DD/MM/YYYY")
-    else:
-        cleaned["dob"] = dob
-        if age_on(dob, now_ist().date()) < MIN_AGE:
-            errors.append("applicant must be %d years of age or above" % MIN_AGE)
-    if not cleaned["doc_path"]:
-        errors.append("age proof document is required")
-    if now_ist() > SCHEME_DEADLINE:
-        errors.append("the application window has closed")
-    return errors, cleaned
+    return services.validate_application(data, doc_path, config)
 
 
 def active_application(cur, mobile):
-    """The applicant's current live application, if any."""
-    cur.execute("SELECT id, application_no, status FROM applications "
-                "WHERE mobile = %s AND status IN %s "
-                "ORDER BY submitted_at DESC LIMIT 1", (mobile, ACTIVE_STATUSES))
-    return cur.fetchone()
+    return services.active_application(cur, mobile)
 
 
 def create_application(cur, mobile, cleaned):
-    """Insert a validated application; ensure the status-portal account exists.
-
-    The caller commits. Returns (id, application_no).
-    """
-    app_no = new_application_no()
-    cur.execute(
-        """INSERT INTO applications
-           (application_no, applicant_name, mobile, dob, gender, marital_status,
-            husband_name, husband_employer, village, block, bank_account, ifsc,
-            doc_path, status, submitted_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
-           RETURNING id""",
-        (app_no, cleaned["applicant_name"], mobile, cleaned["dob"], cleaned["gender"],
-         cleaned["marital_status"], cleaned["husband_name"], cleaned["husband_employer"],
-         cleaned["village"], cleaned["block"], cleaned["bank_account"], cleaned["ifsc"],
-         cleaned["doc_path"], datetime.now()))
-    new_id = cur.fetchone()[0]
-
-    # status portal account; password is DOB as DDMMYYYY per dept. circular
-    portal_pass = cleaned["dob"].strftime("%d%m%Y")
-    cur.execute("SELECT count(*) FROM portal_users WHERE mobile = %s", (mobile,))
-    if cur.fetchone()[0] == 0:
-        cur.execute("INSERT INTO portal_users (mobile, password_hash) VALUES (%s,%s)",
-                    (mobile, hash_password(portal_pass)))
-    write_audit(cur, new_id, "SUBMIT", "applicant:%s" % mobile)
-    return new_id, app_no
+    return services.create_application(cur, mobile, cleaned)
 
 
 # ---------------------------------------------------------------------------
@@ -495,17 +412,13 @@ def withdraw_application(app_id):
     mobile = session["portal_mobile"]
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE applications SET status = 'WITHDRAWN', decided_at = %s, "
-                "decided_by = 'APPLICANT' WHERE id = %s AND mobile = %s "
-                "AND status = 'PENDING' RETURNING application_no",
-                (datetime.now(), app_id, mobile))
-    row = cur.fetchone()
-    if row:
-        write_audit(cur, app_id, "WITHDRAW", "applicant:%s" % mobile)
+    ok, msg, app_no = services.withdraw_application(cur, app_id, mobile)
+    if ok:
         conn.commit()
-        flash("Application %s has been withdrawn. You may submit a new application." % row[0])
+        flash("Application %s has been withdrawn. You may submit a new application." % app_no)
     else:
-        flash("Only a pending application can be withdrawn.")
+        conn.rollback()
+        flash(msg)
     cur.close(); conn.close()
     return redirect(url_for("view_application", app_id=app_id))
 
@@ -646,16 +559,13 @@ def _admin_decide(app_id, new_status, note):
     actor = session.get("admin_user", ADMIN_USERNAME)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE applications SET status = %s, decided_at = %s, decided_by = %s "
-                "WHERE id = %s AND status = 'PENDING' RETURNING application_no",
-                (new_status, datetime.now(), actor, app_id))
-    row = cur.fetchone()
-    if row:
-        write_audit(cur, app_id, new_status, "admin:%s" % actor, note)
+    ok, msg, app_no = services.decide_application(cur, app_id, new_status, "admin:%s" % actor, note)
+    if ok:
         conn.commit()
-        flash("Application %s %s." % (row[0], new_status.lower()))
+        flash(msg)
     else:
-        flash("Only a pending application can be decided.")
+        conn.rollback()
+        flash(msg)
     cur.close(); conn.close()
     return redirect(url_for("admin_view", app_id=app_id))
 

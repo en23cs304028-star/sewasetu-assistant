@@ -42,18 +42,15 @@ def main():
         """UPDATE applications
            SET status = 'DEEMED_APPROVED', decided_at = %s, decided_by = 'RTPS-AUTO'
            WHERE status = 'PENDING' AND submitted_at < %s
-           RETURNING application_no, mobile""",
+           RETURNING id, application_no, mobile""",
         (datetime.now(), cutoff))
     rows = cur.fetchall()
-    cur.execute("SELECT id FROM applications WHERE status = 'DEEMED_APPROVED' "
-                "AND decided_by = 'RTPS-AUTO' AND decided_at >= %s",
-                (datetime.now() - timedelta(minutes=1),))
-    for (app_id,) in cur.fetchall():
+    for app_id, app_no, mobile in rows:
         cur.execute("INSERT INTO audit_log (application_id, action, actor, note, at) "
                     "VALUES (%s, 'DEEMED_APPROVED', 'system:rtps-cron', "
                     "'not processed within SLA', %s)", (app_id, datetime.now()))
     conn.commit()
-    for app_no, mobile in rows:
+    for app_id, app_no, mobile in rows:
         try:
             requests.post(SMS_GATEWAY_URL + "/api/send", json={
                 "to": mobile,
