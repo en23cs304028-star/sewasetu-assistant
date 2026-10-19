@@ -580,6 +580,37 @@ def admin_reject(app_id):
     return _admin_decide(app_id, "REJECTED", request.form.get("note", ""))
 
 
+@app.route("/eval-dashboard")
+def eval_dashboard():
+    """Renders the automated evaluation dashboard showing persona test results."""
+    candidates = [
+        os.path.join(os.path.dirname(BASE_DIR), "evals", "results.json"),
+        os.path.join(BASE_DIR, "evals", "results.json"),
+        os.path.join(BASE_DIR, "..", "evals", "results.json"),
+        "/app/evals/results.json",
+        "/var/sewasetu/evals/results.json"
+    ]
+    data = None
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                import json
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                break
+            except Exception:
+                pass
+    if not data:
+        data = {
+            "timestamp": "N/A",
+            "total_personas": 0,
+            "total_passed": 0,
+            "pass_rate_pct": 0.0,
+            "results": []
+        }
+    return render_template("eval_dashboard.html", data=data)
+
+
 from oauth import oauth as _oauth_blueprint   # noqa: E402  (needs the definitions above)
 app.register_blueprint(_oauth_blueprint)
 

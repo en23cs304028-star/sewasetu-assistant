@@ -259,5 +259,31 @@ class TestServices(unittest.TestCase):
                 self.assertEqual(mock_post.call_count, 2)
 
 
+class TestEvalDashboardRoute(unittest.TestCase):
+    """Verify /eval-dashboard route renders evaluation results and handles missing data gracefully."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app")))
+        with patch.dict(sys.modules, {"psycopg2": MagicMock(), "fpdf": MagicMock()}):
+            import app as flask_app
+            cls.app_client = flask_app.app.test_client()
+
+    def test_eval_dashboard_renders_results(self):
+        resp = self.app_client.get("/eval-dashboard")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn("Sewa Setu — Persona Evaluation Dashboard", html)
+        self.assertIn("Sundari Bai", html)
+        self.assertIn("Pass Rate", html)
+
+    def test_eval_dashboard_handles_missing_file_gracefully(self):
+        with patch("os.path.exists", return_value=False):
+            resp = self.app_client.get("/eval-dashboard")
+            self.assertEqual(resp.status_code, 200)
+            html = resp.get_data(as_text=True)
+            self.assertIn("Sewa Setu — Persona Evaluation Dashboard", html)
+
+
 if __name__ == "__main__":
     unittest.main()

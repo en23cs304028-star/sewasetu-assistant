@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .eval-header { margin-bottom: 24px; border-bottom: 2px solid #1a3c6e; padding-bottom: 12px; }
+  .eval-stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 14px 20px; min-width: 160px; }
+  .stat-num { font-size: 24px; font-weight: bold; color: #1a3c6e; }
+  .stat-label { font-size: 13px; color: #64748b; }
+  .persona-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 20px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .persona-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+  .persona-title { font-size: 18px; font-weight: bold; color: #0f172a; margin: 0; }
+  .persona-meta { font-size: 13px; color: #475569; margin-top: 4px; }
+  .badge-pass { background: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+  .badge-fail { background: #fee2e2; color: #991b1b; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+  .checks-list { margin: 12px 0; padding-left: 20px; font-size: 13px; color: #334155; }
+  .check-pass { color: #15803d; font-weight: 500; }
+  .check-fail { color: #b91c1c; font-weight: 500; }
+  .transcript-box { background: #f1f5f9; border-radius: 6px; padding: 12px; margin-top: 10px; font-family: monospace; font-size: 12px; max-height: 240px; overflow-y: auto; white-space: pre-wrap; }
+  .fix-note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 10px 14px; margin-top: 12px; font-size: 13px; color: #1e3a8a; }
+  details summary { cursor: pointer; color: #1a3c6e; font-weight: 600; font-size: 13px; margin-top: 8px; }
+</style>
+
+<div class="eval-header">
+  <h2>Sewa Setu — Persona Evaluation Dashboard</h2>
+  <p class="note">Automated evaluations of Citizen and Officer MCP servers across realistic personas and boundary test cases.</p>
+</div>
+
+<div class="eval-stats">
+  <div class="stat-card">
+    <div class="stat-num">{{ data.total_personas }}</div>
+    <div class="stat-label">Total Personas Evaluated</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-num" style="color: #166534;">{{ data.total_passed }}</div>
+    <div class="stat-label">Passed</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-num">{{ data.pass_rate_pct }}%</div>
+    <div class="stat-label">Pass Rate</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-num" style="font-size: 15px; padding-top: 6px;">{{ data.timestamp }}</div>
+    <div class="stat-label">Last Evaluation Run</div>
+  </div>
+</div>
+
+<h3>Evaluated Personas & Scenarios</h3>
+
+{% for r in data.results %}
+<div class="persona-card">
+  <div class="persona-top">
+    <div>
+      <h4 class="persona-title">{{ r.name }}</h4>
+      <div class="persona-meta">
+        Type: <b>{{ r.persona_type }}</b> &middot; Scenario ID: <code>{{ r.id }}</code>
+      </div>
+    </div>
+    <div>
+      {% if r.passed %}
+        <span class="badge-pass">&check; PASS</span>
+      {% else %}
+        <span class="badge-fail">&cross; FAIL</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div><b>Database & System Assertions:</b></div>
+  <ul class="checks-list">
+    {% for c in r.checks %}
+      <li>
+        {% if c.passed %}
+          <span class="check-pass">&check;</span> {{ c.check }}
+        {% else %}
+          <span class="check-fail">&cross;</span> {{ c.check }} (FAILED)
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+
+  <div class="fix-note">
+    <b>What changed because of this eval:</b> {{ r.what_changed_because_of_eval }}
+  </div>
+
+  <details>
+    <summary>View Dialogue & Tool Calls Transcript</summary>
+    <div class="transcript-box">
+      {% for turn in r.transcript %}
+<b>[{{ turn.speaker }}]</b>
+{% if turn.text %}{{ turn.text }}{% endif %}
+{% if turn.tool_call %}Call: {{ turn.tool_call }}{% endif %}
+{% if turn.response %}Response: {{ turn.response | tojson(indent=2) }}{% endif %}
+{% if turn.action %}Action: {{ turn.action }}{% endif %}
+{% if turn.errors %}Errors: {{ turn.errors | tojson }}{% endif %}
+---
+      {% endfor %}
+    </div>
+  </details>
+</div>
+{% endfor %}
+
+{% endblock %}
