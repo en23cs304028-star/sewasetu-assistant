@@ -178,6 +178,32 @@ class TestOfficialSDKMCP(unittest.TestCase):
         self.assertEqual(resp.status_code, 405)
         self.assertEqual(resp.headers.get("Allow"), "POST")
 
+    def test_07_all_supported_protocol_versions(self):
+        """Test official MCP SDK client pinned to EACH handshake protocol version."""
+        import mcp.client.session as mcp_session
+        token = self.mint_token("9990001001", "citizen", f"{self.issuer}/mcp/citizen")
+        endpoint = f"{self.base_url}/mcp/citizen"
+
+        async def run_pinned_versions():
+            orig_version = mcp_session.LATEST_HANDSHAKE_VERSION
+            try:
+                for v in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
+                    mcp_session.LATEST_HANDSHAKE_VERSION = v
+                    headers = {"Authorization": f"Bearer {token}"}
+                    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+                        async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (r, w):
+                            async with ClientSession(r, w) as session:
+                                init_res = await session.initialize()
+                                self.assertEqual(init_res.protocol_version, v)
+                                tools_res = await session.list_tools()
+                                self.assertEqual(len(tools_res.tools), 6)
+                                call_res = await session.call_tool("get_scheme_info", {})
+                                self.assertFalse(call_res.is_error)
+            finally:
+                mcp_session.LATEST_HANDSHAKE_VERSION = orig_version
+
+        asyncio.run(run_pinned_versions())
+
 
 if __name__ == "__main__":
     unittest.main()

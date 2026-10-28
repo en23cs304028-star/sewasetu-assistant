@@ -301,8 +301,32 @@ def handle_submission():
               "apply afresh." % (existing[1], existing[2]))
         return redirect(url_for("index"))
 
-    new_id, app_no = create_application(cur, mobile, cleaned)
-    conn.commit()
+    try:
+        new_id, app_no = create_application(cur, mobile, cleaned)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        err_str = str(e)
+        is_unique_violation = False
+        try:
+            import psycopg2.errors
+            if isinstance(e, (psycopg2.IntegrityError, psycopg2.errors.UniqueViolation)):
+                is_unique_violation = True
+        except Exception:
+            pass
+        if is_unique_violation or "uq_active_application_mobile" in err_str:
+            cur.close(); conn.close()
+            conn2 = get_db()
+            cur2 = conn2.cursor()
+            existing = active_application(cur2, mobile)
+            cur2.close(); conn2.close()
+            msg = ("Application %s (%s) already exists for this mobile number. A pending "
+                   "application can be withdrawn from the status portal if you need to "
+                   "apply afresh." % (existing[1], existing[2])) if existing else "Active application already exists for this mobile number."
+            flash(msg)
+            return redirect(url_for("index"))
+        cur.close(); conn.close()
+        raise
     cur.close(); conn.close()
 
     session.pop("form_data", None)

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS otps (
 
 CREATE INDEX IF NOT EXISTS idx_app_mobile ON applications(mobile);
 CREATE INDEX IF NOT EXISTS idx_app_status ON applications(status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_application_mobile ON applications (mobile) WHERE status IN ('PENDING', 'APPROVED', 'DEEMED_APPROVED');
 
 -- Who did what to an application, and when (submit / withdraw / approve / reject / deemed).
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -118,9 +119,9 @@ CREATE TABLE IF NOT EXISTS drafts (
     payload_hash    VARCHAR(64) NOT NULL,
     scheme_version  VARCHAR(32) NOT NULL DEFAULT 'v1.0',
     status          VARCHAR(20) NOT NULL DEFAULT 'prepared',
-    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    expires_at      TIMESTAMP NOT NULL,
-    submitted_at    TIMESTAMP,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ NOT NULL,
+    submitted_at    TIMESTAMPTZ,
     application_id  INTEGER REFERENCES applications(id) ON DELETE SET NULL,
     CONSTRAINT chk_draft_status CHECK (status IN ('prepared', 'submitted', 'withdrawn', 'expired'))
 );

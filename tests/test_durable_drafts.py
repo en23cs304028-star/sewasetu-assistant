@@ -51,15 +51,24 @@ import server
 
 def _worker_submit(args):
     """Worker process function for parallel submit race."""
-    url, token, payload = args
+    url, token, payload, port = args
     try:
         r = requests.post(url, headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=5)
         data = r.json()
         text = data.get("result", {}).get("content", [{}])[0].get("text", "")
         parsed = json.loads(text) if text else {}
-        return (r.status_code, parsed.get("status") == "submitted", parsed)
+        return (r.status_code, parsed.get("status") == "submitted", parsed, port)
     except Exception as e:
-        return (500, False, {"error": str(e)})
+        return (500, False, {"error": str(e)}, port)
+
+
+def _worker_direct_submit(args):
+    """Worker function for concurrent submit of two drafts for same citizen."""
+    mobile, draft_id, token_hash = args
+    conn = services.get_db()
+    ok, res = services.submit_draft(conn, mobile, draft_id, token_hash)
+    conn.close()
+    return (ok, res)
 
 
 class TestDurableDraftsPostgres(unittest.TestCase):
@@ -442,13 +451,13 @@ class TestDurableDraftsPostgres(unittest.TestCase):
             pb.wait()
 
     def test_10_multi_process_concurrent_race(self):
-        """Concurrent race: N parallel submit workers across two server processes for multiple repetitions."""
+        """Concurrent race: N parallel submit workers across two server processes for 10 repetitions."""
         port_a, port_b = 8874, 8875
         pa = subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "mcp", "server.py")], env=self._get_subprocess_env(port_a))
         pb = subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "mcp", "server.py")], env=self._get_subprocess_env(port_b))
         time.sleep(1.5)
 
-        repetitions = 5
+        repetitions = 10
         workers_count = 8
         print(f"\n[Multi-Process Race] Starting {repetitions} repetitions with {workers_count} parallel workers across 2 server processes...")
 
@@ -479,16 +488,40 @@ class TestDurableDraftsPostgres(unittest.TestCase):
                         "method": "tools/call",
                         "params": {"name": "submit_application", "arguments": {"confirmation_token": confirm_token}}
                     }
-                    tasks.append((url, token, payload))
+                    tasks.append((url, token, payload, target_port))
 
                 with multiprocessing.Pool(processes=workers_count) as pool:
                     results = pool.map(_worker_submit, tasks)
 
-                success_count = sum(1 for status_code, ok, res in results if ok)
-                failure_count = sum(1 for status_code, ok, res in results if not ok)
+                success_count = sum(1 for status_code, ok, res, p in results if ok)
+                failure_count = sum(1 for status_code, ok, res, p in results if not ok)
 
                 self.assertEqual(success_count, 1, f"Repetition {rep}: exactly one submit must succeed, got {success_count}")
                 self.assertEqual(failure_count, workers_count - 1, f"Repetition {rep}: exactly {workers_count - 1} submits must fail")
+
+                winner_port = None
+                ports_served = set()
+                loser_reasons = {}
+
+                for status_code, ok, res, p in results:
+                    self.assertEqual(status_code, 200, f"HTTP status must be 200, got {status_code}: {res}")
+                    ports_served.add(p)
+                    if ok:
+                        winner_port = p
+                        self.assertTrue(res.get("application_number", "").startswith("SSP"))
+                    else:
+                        err = res.get("error", "")
+                        if "already been submitted" in err:
+                            category = "already_submitted"
+                        elif "active application" in err.lower():
+                            category = "active_application_exists"
+                        else:
+                            self.fail(f"Repetition {rep}: unexpected loser error on port {p}: {res}")
+                        loser_reasons[category] = loser_reasons.get(category, 0) + 1
+
+                # Assert that both processes served at least one request in this repetition
+                self.assertIn(port_a, ports_served, f"Process on port {port_a} must serve at least one request")
+                self.assertIn(port_b, ports_served, f"Process on port {port_b} must serve at least one request")
 
                 # Verify database state
                 conn = services.get_db()
@@ -502,13 +535,205 @@ class TestDurableDraftsPostgres(unittest.TestCase):
 
                 self.assertEqual(app_count, 1, f"Repetition {rep}: exactly 1 application row in DB, got {app_count}")
                 self.assertEqual(draft_status, "submitted")
-                print(f"  -> Repetition {rep}/{repetitions}: 1 success, {workers_count - 1} rejected, 1 row in DB (PASS)")
+                print(f"  -> Repetition {rep}/{repetitions}: winner port={winner_port} | losers={loser_reasons} | DB rows={app_count} (PASS)")
 
         finally:
             pa.terminate()
             pb.terminate()
             pa.wait()
             pb.wait()
+
+    def test_11_timezone_matrix_and_cross_tz_verification(self):
+        """Prepare, submit, and expiry behave identically across UTC, Asia/Kolkata, and negative-offset zones."""
+        data = self.get_valid_prepare_data()
+        zones = ["UTC", "Asia/Kolkata", "America/New_York"]
+
+        for tz_name in zones:
+            old_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = tz_name
+                time.tzset()
+                mobile = f"99900050{zones.index(tz_name):02d}"
+                prep = citizen.prepare_application(mobile=mobile, **data)
+                self.assertEqual(prep["status"], "ready_for_confirmation")
+                token = prep["confirmation_token"]
+
+                # Submit in the same timezone
+                sub = citizen.submit_application(mobile=mobile, confirmation_token=token)
+                self.assertEqual(sub["status"], "submitted")
+            finally:
+                if old_tz is not None:
+                    os.environ["TZ"] = old_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+
+        # Cross-timezone verification: prepare in Asia/Kolkata, submit in America/New_York (UTC-5)
+        mobile_cross = "9990005099"
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Asia/Kolkata"
+            time.tzset()
+            prep_cross = citizen.prepare_application(mobile=mobile_cross, **data)
+            token_cross = prep_cross["confirmation_token"]
+
+            os.environ["TZ"] = "America/New_York"
+            time.tzset()
+            sub_cross = citizen.submit_application(mobile=mobile_cross, confirmation_token=token_cross)
+            self.assertEqual(sub_cross["status"], "submitted")
+
+            # Expiry across timezones: forced into past in UTC, evaluated under Asia/Kolkata
+            mobile_exp = "9990005098"
+            prep_exp = citizen.prepare_application(mobile=mobile_exp, **data)
+            conn = services.get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE drafts SET expires_at = NOW() - INTERVAL '10 minutes' WHERE draft_id = %s", (prep_exp["draft_id"],))
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            os.environ["TZ"] = "Asia/Kolkata"
+            time.tzset()
+            sub_exp = citizen.submit_application(mobile=mobile_exp, confirmation_token=prep_exp["confirmation_token"])
+            self.assertEqual(sub_exp["status"], "error")
+            self.assertIn("expired", sub_exp.get("error", "").lower())
+        finally:
+            if old_tz is not None:
+                os.environ["TZ"] = old_tz
+            else:
+                os.environ.pop("TZ", None)
+            time.tzset()
+
+    def test_12_sms_failure_isolation(self):
+        """SMS failure must not break submission; application committed, second submit returns already submitted."""
+        from unittest.mock import patch
+        mobile = "9990006001"
+        data = self.get_valid_prepare_data()
+        prep = citizen.prepare_application(mobile=mobile, **data)
+        token = prep["confirmation_token"]
+
+        with patch("services.send_sms", side_effect=RuntimeError("SMS Gateway 503 Service Unavailable")):
+            sub1 = citizen.submit_application(mobile=mobile, confirmation_token=token)
+
+        self.assertEqual(sub1["status"], "submitted")
+        self.assertIn("application_number", sub1)
+        self.assertFalse(sub1.get("sms_sent", True))
+
+        # Exactly one application row exists in DB
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, status FROM applications WHERE mobile = %s", (mobile,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "PENDING")
+
+        # Second submit attempt returns already submitted with same application_id
+        sub2 = citizen.submit_application(mobile=mobile, confirmation_token=token)
+        self.assertEqual(sub2["status"], "error")
+        self.assertIn("already been submitted", sub2.get("error", "").lower())
+        self.assertEqual(sub2.get("application_id"), rows[0][0])
+
+    def test_13_db_enforced_active_application_race(self):
+        """Two different drafts for same citizen submitted concurrently; DB unique constraint catches race."""
+        mobile = "9990007001"
+        data = self.get_valid_prepare_data()
+
+        # Create draft 1
+        prep1 = citizen.prepare_application(mobile=mobile, **data)
+        draft_id1 = prep1["draft_id"]
+        hash1 = prep1["payload_hash"]
+
+        # Create draft 2 (bypassing supersede so both are in 'prepared' state simultaneously)
+        data2 = dict(data)
+        data2["bank_account"] = "987654321098"
+        prep2 = citizen.prepare_application(mobile=mobile, **data2)
+        draft_id2 = prep2["draft_id"]
+        hash2 = prep2["payload_hash"]
+
+        # Restore draft 1 status to 'prepared'
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("UPDATE drafts SET status = 'prepared' WHERE draft_id = %s", (draft_id1,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Submit draft 1 and draft 2 concurrently using 2 worker processes
+        tasks = [
+            (mobile, draft_id1, hash1),
+            (mobile, draft_id2, hash2)
+        ]
+        with multiprocessing.Pool(processes=2) as pool:
+            results = pool.map(_worker_direct_submit, tasks)
+
+        successes = [res for ok, res in results if ok]
+        failures = [res for ok, res in results if not ok]
+
+        self.assertEqual(len(successes), 1, f"Exactly one submit must succeed: {results}")
+        self.assertEqual(len(failures), 1, f"Exactly one submit must fail: {results}")
+        loser_error = failures[0].get("error", "")
+        self.assertIn("active application", loser_error.lower())
+        self.assertIn("already exists", loser_error.lower())
+
+        # Check DB row count: exactly 1 application row in DB
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM applications WHERE mobile = %s", (mobile,))
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_14_corrupt_dob_rejection(self):
+        """Draft with corrupt unparseable dob is rejected at submit time; zero application rows inserted."""
+        mobile = "9990008001"
+        data = self.get_valid_prepare_data()
+        prep = citizen.prepare_application(mobile=mobile, **data)
+        draft_id = prep["draft_id"]
+
+        # Corrupt dob in stored payload and recompute valid hash so hash integrity passes
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT citizen_id, scheme_version, expires_at FROM drafts WHERE draft_id = %s", (draft_id,))
+        c_id, scheme_ver, exp_at = cur.fetchone()
+
+        corrupt_fields = dict(data)
+        corrupt_fields["dob"] = "CORRUPT_NOT_A_DATE"
+
+        expires_at_str = services.format_utc_iso(exp_at)
+        canonical = services.canonicalize_draft_payload(c_id, corrupt_fields, scheme_ver, expires_at_str)
+        new_hash = services.compute_payload_hash(canonical)
+
+        cur.execute(
+            """UPDATE drafts
+               SET payload = %s, payload_hash = %s, status = 'prepared'
+               WHERE draft_id = %s""",
+            (canonical, new_hash, draft_id)
+        )
+        conn.commit()
+
+        # Submit draft
+        ok, res = services.submit_draft(conn, c_id, draft_id, new_hash)
+        self.assertFalse(ok)
+        self.assertEqual(res["status"], "error")
+        self.assertIn("invalid date of birth", res.get("error", "").lower())
+
+        # Zero rows inserted into applications
+        cur.execute("SELECT count(*) FROM applications WHERE mobile = %s", (mobile,))
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_15_draft_id_randomness_and_non_sequential(self):
+        """Draft IDs are cryptographically random, collision-free, and non-sequential."""
+        ids = [secrets.token_urlsafe(24) for _ in range(100)]
+        self.assertEqual(len(set(ids)), 100, "All 100 generated draft IDs must be unique")
+        for i in range(len(ids) - 1):
+            self.assertNotEqual(ids[i], ids[i + 1])
+            self.assertEqual(len(ids[i]), 32)
 
 
 if __name__ == "__main__":

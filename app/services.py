@@ -11,10 +11,13 @@ import hashlib
 import hmac
 import json
 import secrets
+import logging
 import configparser
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
+
+logger = logging.getLogger("sewasetu.services")
 
 IST = ZoneInfo("Asia/Kolkata")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -269,7 +272,7 @@ def withdraw_application(cur, app_id, mobile, actor=None):
 # ---------------------------------------------------------------------------
 
 def ensure_drafts_table(conn):
-    """Idempotently ensures the drafts table and indexes exist."""
+    """Idempotently ensures the drafts table, indexes, and active application index exist."""
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS drafts (
@@ -279,18 +282,67 @@ def ensure_drafts_table(conn):
             payload_hash    VARCHAR(64) NOT NULL,
             scheme_version  VARCHAR(32) NOT NULL DEFAULT 'v1.0',
             status          VARCHAR(20) NOT NULL DEFAULT 'prepared',
-            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-            expires_at      TIMESTAMP NOT NULL,
-            submitted_at    TIMESTAMP,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at      TIMESTAMPTZ NOT NULL,
+            submitted_at    TIMESTAMPTZ,
             application_id  INTEGER REFERENCES applications(id) ON DELETE SET NULL,
             CONSTRAINT chk_draft_status CHECK (status IN ('prepared', 'submitted', 'withdrawn', 'expired'))
         );
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'drafts' AND column_name = 'created_at' AND data_type = 'timestamp without time zone'
+            ) THEN
+                ALTER TABLE drafts ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC';
+                ALTER TABLE drafts ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at AT TIME ZONE 'UTC';
+                ALTER TABLE drafts ALTER COLUMN submitted_at TYPE TIMESTAMPTZ USING submitted_at AT TIME ZONE 'UTC';
+            END IF;
+        END $$;
         CREATE INDEX IF NOT EXISTS idx_drafts_citizen_id ON drafts (citizen_id);
         CREATE INDEX IF NOT EXISTS idx_drafts_expires_at ON drafts (expires_at);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_application_id ON drafts (application_id) WHERE application_id IS NOT NULL;
     """)
     conn.commit()
     cur.close()
+    ensure_active_application_index(conn)
+
+
+def ensure_active_application_index(conn):
+    """
+    Idempotently ensures the unique partial index on active applications exists.
+    Checks for duplicate active applications before creation; reports them without deleting rows.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT mobile, count(*)
+        FROM applications
+        WHERE status IN ('PENDING', 'APPROVED', 'DEEMED_APPROVED')
+        GROUP BY mobile
+        HAVING count(*) > 1
+    """)
+    dups = cur.fetchall()
+    if dups:
+        cur.close()
+        raise RuntimeError(f"Cannot create unique index: duplicate active applications exist in DB: {dups}")
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_active_application_mobile
+        ON applications (mobile)
+        WHERE status IN ('PENDING', 'APPROVED', 'DEEMED_APPROVED');
+    """)
+    conn.commit()
+    cur.close()
+
+
+def format_utc_iso(dt):
+    """Formats datetime as fixed UTC ISO-8601 string with Z suffix."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def canonicalize_draft_payload(citizen_id, cleaned_data, scheme_version, expires_at_str):
@@ -333,10 +385,10 @@ def create_draft(cur, citizen_id, cleaned_data, scheme_version="v1.0", ttl_minut
         (citizen_id,)
     )
 
-    draft_id = secrets.token_hex(16)  # 128-bit unguessable random ID
-    created_at = datetime.now()
+    draft_id = secrets.token_urlsafe(24)  # 192-bit cryptographic randomness
+    created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(minutes=ttl_minutes)
-    expires_at_str = expires_at.isoformat()
+    expires_at_str = format_utc_iso(expires_at)
 
     canonical_json = canonicalize_draft_payload(citizen_id, cleaned_data, scheme_version, expires_at_str)
     payload_hash = compute_payload_hash(canonical_json)
@@ -373,6 +425,11 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
         cfg = load_config()
 
     cur = conn.cursor()
+    app_no = None
+    new_app_id = None
+    now_utc = datetime.now(timezone.utc)
+    cleaned = {}
+
     try:
         # 1. Lock the draft row exclusively for this authenticated citizen
         cur.execute(
@@ -411,9 +468,9 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
                 "error": "Draft is not in a submittable state (status: %s)." % status
             }
 
-        # 3. Check expiry
-        now = datetime.now()
-        if now > expires_at:
+        # 3. Check expiry (timezone-aware UTC comparison)
+        expires_at_utc = expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at.astimezone(timezone.utc)
+        if now_utc > expires_at_utc:
             cur.execute("UPDATE drafts SET status = 'expired' WHERE draft_id = %s", (d_id,))
             conn.commit()
             return False, {
@@ -426,11 +483,12 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
         payload_dict = payload_raw if isinstance(payload_raw, dict) else json.loads(payload_raw)
         app_fields = payload_dict.get("application_fields", payload_dict)
 
+        expires_at_str = format_utc_iso(expires_at_utc)
         canonical_str = canonicalize_draft_payload(
             citizen_id=c_id,
             cleaned_data=app_fields,
             scheme_version=scheme_ver,
-            expires_at_str=expires_at.isoformat()
+            expires_at_str=expires_at_str
         )
         recomputed_hash = compute_payload_hash(canonical_str)
 
@@ -461,7 +519,7 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
                 "error": "Active application %s already exists for this mobile number." % existing[1]
             }
 
-        # 6. Insert new application row
+        # 6. Parse and validate date of birth
         cleaned = dict(app_fields)
         if isinstance(cleaned.get("dob"), str):
             dob_str = cleaned["dob"].strip()
@@ -473,6 +531,14 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
                     parsed = None
             cleaned["dob"] = parsed
 
+        if not cleaned.get("dob") or not isinstance(cleaned["dob"], (date, datetime)):
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Invalid date of birth in draft. Cannot submit without a valid date of birth.",
+                "error_hi": "Aavedan me janmatithi amaanya hai."
+            }
+
         actor = "applicant:%s" % c_id
         new_app_id, app_no = create_application(cur, c_id, cleaned, actor=actor)
 
@@ -481,30 +547,59 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
             """UPDATE drafts
                SET status = 'submitted', submitted_at = %s, application_id = %s
                WHERE draft_id = %s""",
-            (now, new_app_id, d_id)
+            (now_utc, new_app_id, d_id)
         )
 
         conn.commit()
-
-        # Send confirmation SMS
-        send_sms(
-            c_id,
-            "Sewa Setu: application %s received. Track at the status portal with mobile no. and password (DOB as DDMMYYYY)." % app_no,
-            cfg
-        )
-
-        return True, {
-            "status": "submitted",
-            "application_number": app_no,
-            "applicant_name": cleaned.get("applicant_name", ""),
-            "submission_date": now.strftime("%d/%m/%Y %H:%M"),
-            "status_code": "PENDING",
-            "message": "Application %s successfully submitted." % app_no,
-            "message_hi": "Aapka aavedan kramank %s safaltapoorvak jama ho gaya hai." % app_no,
-            "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
-        }
-    except Exception:
+    except Exception as e:
         conn.rollback()
+        err_str = str(e)
+        is_unique_violation = False
+        try:
+            import psycopg2.errors
+            if isinstance(e, (psycopg2.IntegrityError, psycopg2.errors.UniqueViolation)):
+                is_unique_violation = True
+        except Exception:
+            pass
+        if is_unique_violation or "uq_active_application_mobile" in err_str:
+            cur2 = conn.cursor()
+            existing = active_application(cur2, citizen_id)
+            cur2.close()
+            if existing:
+                return False, {
+                    "status": "error",
+                    "error": "Active application %s already exists for this mobile number." % existing[1],
+                    "error_hi": "Is mobile number par pehle se ek aavedan kramank maujood hai."
+                }
+            return False, {
+                "status": "error",
+                "error": "Active application already exists for this mobile number.",
+                "error_hi": "Is mobile number par pehle se ek aavedan kramank maujood hai."
+            }
         raise
     finally:
         cur.close()
+
+    # SMS delivery outside the DB transaction so gateway errors don't fail submission
+    sms_sent = False
+    try:
+        send_sms(
+            citizen_id,
+            "Sewa Setu: application %s received. Track at the status portal with mobile no. and password (DOB as DDMMYYYY)." % app_no,
+            cfg
+        )
+        sms_sent = True
+    except Exception as e:
+        logger.warning("Failed to send confirmation SMS to %s for application %s: %s", citizen_id, app_no, e)
+
+    return True, {
+        "status": "submitted",
+        "application_number": app_no,
+        "applicant_name": cleaned.get("applicant_name", ""),
+        "submission_date": now_utc.strftime("%d/%m/%Y %H:%M"),
+        "status_code": "PENDING",
+        "sms_sent": sms_sent,
+        "message": "Application %s successfully submitted." % app_no,
+        "message_hi": "Aapka aavedan kramank %s safaltapoorvak jama ho gaya hai." % app_no,
+        "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
+    }
