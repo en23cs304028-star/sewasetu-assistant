@@ -147,13 +147,36 @@ class TestMCPServers(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value = mock_cur
-        # active_application returns None (no duplicate)
-        mock_cur.fetchone.side_effect = [
-            None,      # active_application in prepare
-            None,      # active_application in submit
-            (701,),    # create_application RETURNING id
-            (0,),      # portal_users check
-        ]
+
+        stored_draft = {}
+
+        def mock_execute(sql, params=None):
+            sql_clean = " ".join(sql.split()).upper()
+            if "INSERT INTO DRAFTS" in sql_clean:
+                # (draft_id, citizen_id, payload, payload_hash, scheme_version, created_at, expires_at)
+                stored_draft["row"] = (params[0], params[1], params[2], params[3], params[4], 'prepared', params[6], None)
+            elif "UPDATE DRAFTS SET STATUS = 'SUBMITTED'" in sql_clean:
+                r = stored_draft.get("row")
+                if r:
+                    stored_draft["row"] = (r[0], r[1], r[2], r[3], r[4], 'submitted', r[6], params[1])
+
+        def mock_fetchone():
+            calls = mock_cur.execute.call_args_list
+            if not calls:
+                return None
+            last_sql = " ".join(calls[-1][0][0].split()).upper()
+            if "FROM DRAFTS" in last_sql:
+                return stored_draft.get("row")
+            elif "FROM APPLICATIONS" in last_sql and "SELECT ID, APPLICATION_NO, STATUS" in last_sql:
+                return None
+            elif "INSERT INTO APPLICATIONS" in last_sql:
+                return (701,)
+            elif "FROM PORTAL_USERS" in last_sql:
+                return (0,)
+            return None
+
+        mock_cur.execute.side_effect = mock_execute
+        mock_cur.fetchone.side_effect = mock_fetchone
 
         dummy_doc = base64.b64encode(b"Dummy PDF content").decode()
 

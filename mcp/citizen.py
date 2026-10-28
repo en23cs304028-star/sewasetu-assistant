@@ -18,17 +18,8 @@ sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 import services
 from auth import revoke_citizen_session
 
-# In-memory store for pre-submission drafts: token -> {data, mobile, doc_path, created_at}
-# 15-minute validity window
+# Deprecated in-memory store retained as empty dict for test setUp backward-compatibility
 DRAFTS = {}
-DRAFT_TTL_SECONDS = 900
-
-
-def clean_expired_drafts():
-    now = time.time()
-    expired = [tok for tok, d in DRAFTS.items() if now - d["created_at"] > DRAFT_TTL_SECONDS]
-    for tok in expired:
-        DRAFTS.pop(tok, None)
 
 
 def get_scheme_info():
@@ -112,10 +103,10 @@ def prepare_application(mobile, applicant_name, dob, gender, marital_status, hus
                         village, block, bank_account, ifsc, document_filename=None, document_base64=None):
     """
     Validates form data and age proof in dry-run mode.
-    On success: returns preview and a single-use confirmation_token valid for 15 minutes.
+    On success: persists draft to Postgres and returns preview, draft_id, payload_hash, and confirmation_token.
+    Valid for 30 minutes. Single-use and cryptographically bound to exact application data.
     The assistant must read the preview and declaration aloud to the citizen before calling submit_application.
     """
-    clean_expired_drafts()
     cfg = services.load_config()
 
     # Save document if provided
@@ -179,10 +170,10 @@ def prepare_application(mobile, applicant_name, dob, gender, marital_status, hus
     conn = services.get_db(cfg)
     cur = conn.cursor()
     existing = services.active_application(cur, mobile)
-    cur.close()
-    conn.close()
 
     if existing:
+        cur.close()
+        conn.close()
         return {
             "status": "active_application_exists",
             "existing_application_no": existing[1],
@@ -192,21 +183,22 @@ def prepare_application(mobile, applicant_name, dob, gender, marital_status, hus
             "next_step": "If this was an error, you may withdraw your pending application first."
         }
 
-    # Store draft and generate confirmation token
-    token = secrets.token_urlsafe(24)
-    DRAFTS[token] = {
-        "cleaned": cleaned,
-        "mobile": mobile,
-        "doc_path": doc_path,
-        "created_at": time.time()
-    }
+    # Persist durable draft in Postgres and generate cryptographically bound confirmation token
+    draft_id, payload_hash, confirmation_token, expires_at = services.create_draft(
+        cur, mobile, cleaned, scheme_version="v1.0", ttl_minutes=30
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
     masked_acc = "XXXX" + cleaned["bank_account"][-4:] if len(cleaned["bank_account"]) >= 4 else cleaned["bank_account"]
 
     return {
         "status": "ready_for_confirmation",
-        "confirmation_token": token,
-        "valid_for_minutes": 15,
+        "draft_id": draft_id,
+        "payload_hash": payload_hash,
+        "confirmation_token": confirmation_token,
+        "valid_for_minutes": 30,
         "preview": {
             "applicant_name": cleaned["applicant_name"],
             "date_of_birth": cleaned["dob"].strftime("%d/%m/%Y"),
@@ -222,71 +214,38 @@ def prepare_application(mobile, applicant_name, dob, gender, marital_status, hus
     }
 
 
-def submit_application(mobile, confirmation_token):
+def submit_application(mobile, confirmation_token=None, draft_id=None, hash=None):
     """
-    Submits an application using a verified confirmation_token from prepare_application.
-    Accepts ONLY the token. Creates the record, sends SMS, and writes audit entry.
+    Submits a validated application using the draft_id and confirmation token/hash.
+    Accepts confirmation_token (formatted as <draft_id>.<hash>), or draft_id and confirmation_token/hash.
+    Enforces atomic DB row lock, single-use, non-expiry, and cryptographic hash verification.
     """
-    clean_expired_drafts()
-    draft = DRAFTS.get(confirmation_token)
+    d_id = None
+    p_hash = None
 
-    if not draft:
+    if draft_id and (confirmation_token or hash):
+        d_id = str(draft_id).strip()
+        p_hash = str(hash or confirmation_token).strip()
+    elif confirmation_token:
+        tok = str(confirmation_token).strip()
+        if "." in tok:
+            d_id, p_hash = tok.split(".", 1)
+        else:
+            d_id = tok
+            p_hash = str(hash or "").strip()
+
+    if not d_id or not p_hash:
         return {
             "status": "error",
-            "error": "Invalid or expired confirmation token. Please prepare the application again.",
-            "error_hi": "Token avaidh ya expire ho gaya hai. Kripya punah koshish karein."
-        }
-
-    if draft["mobile"] != mobile:
-        return {
-            "status": "error",
-            "error": "Token does not match authenticated citizen session.",
-            "error_hi": "Session suraksha truti."
+            "error": "Both draft_id and confirmation token/hash are required to submit.",
+            "error_hi": "Aavedan submit karne ke liye draft_id aur confirmation token anivarya hain."
         }
 
     cfg = services.load_config()
     conn = services.get_db(cfg)
-    cur = conn.cursor()
-
-    # Re-verify active application at submission time
-    existing = services.active_application(cur, mobile)
-    if existing:
-        cur.close()
-        conn.close()
-        DRAFTS.pop(confirmation_token, None)
-        return {
-            "status": "error",
-            "error": "Active application %s already exists for this mobile number." % existing[1]
-        }
-
-    # Create application through shared service
-    cleaned = draft["cleaned"]
-    actor = "applicant:%s" % mobile
-    new_id, app_no = services.create_application(cur, mobile, cleaned, actor=actor)
-    conn.commit()
-    cur.close()
+    ok, result = services.submit_draft(conn, mobile, d_id, p_hash, cfg)
     conn.close()
-
-    # Single-use: remove draft
-    DRAFTS.pop(confirmation_token, None)
-
-    # Send confirmation SMS via shared service
-    services.send_sms(
-        mobile,
-        "Sewa Setu: application %s received. Track at the status portal with mobile no. and password (DOB as DDMMYYYY)." % app_no,
-        cfg
-    )
-
-    return {
-        "status": "submitted",
-        "application_number": app_no,
-        "applicant_name": cleaned["applicant_name"],
-        "submission_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "status_code": "PENDING",
-        "message": "Application %s successfully submitted." % app_no,
-        "message_hi": "Aapka aavedan kramank %s safaltapoorvak jama ho gaya hai." % app_no,
-        "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
-    }
+    return result
 
 
 def withdraw_application(mobile, confirm=False):
@@ -334,6 +293,7 @@ def withdraw_application(mobile, confirm=False):
 
     ok, msg, _ = services.withdraw_application(cur, app_id, mobile, actor="applicant:%s" % mobile)
     if ok:
+        services.invalidate_citizen_drafts(cur, mobile, "withdrawn")
         conn.commit()
     else:
         conn.rollback()
@@ -351,6 +311,16 @@ def withdraw_application(mobile, confirm=False):
 def sign_out(mobile):
     """Ends the citizen session and revokes tokens for shared-device and kiosk safety."""
     revoked = revoke_citizen_session(mobile)
+    try:
+        conn = services.get_db()
+        cur = conn.cursor()
+        services.invalidate_citizen_drafts(cur, mobile, "expired")
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
     return {
         "status": "signed_out",
         "sessions_revoked": revoked,

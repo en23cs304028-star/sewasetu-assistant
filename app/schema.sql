@@ -109,3 +109,23 @@ CREATE TABLE IF NOT EXISTS oauth_program_tokens (     -- admin-issued, long-live
     expires_at TIMESTAMP,
     revoked_at TIMESTAMP
 );
+
+-- Durable citizen draft applications (multi-process safe, canonical hash bound)
+CREATE TABLE IF NOT EXISTS drafts (
+    draft_id        VARCHAR(64) PRIMARY KEY,
+    citizen_id      VARCHAR(64) NOT NULL,
+    payload         JSONB NOT NULL,
+    payload_hash    VARCHAR(64) NOT NULL,
+    scheme_version  VARCHAR(32) NOT NULL DEFAULT 'v1.0',
+    status          VARCHAR(20) NOT NULL DEFAULT 'prepared',
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMP NOT NULL,
+    submitted_at    TIMESTAMP,
+    application_id  INTEGER REFERENCES applications(id) ON DELETE SET NULL,
+    CONSTRAINT chk_draft_status CHECK (status IN ('prepared', 'submitted', 'withdrawn', 'expired'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_drafts_citizen_id ON drafts (citizen_id);
+CREATE INDEX IF NOT EXISTS idx_drafts_expires_at ON drafts (expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_application_id ON drafts (application_id) WHERE application_id IS NOT NULL;
+

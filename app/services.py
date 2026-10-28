@@ -8,6 +8,9 @@ import os
 import re
 import random
 import hashlib
+import hmac
+import json
+import secrets
 import configparser
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -259,3 +262,249 @@ def withdraw_application(cur, app_id, mobile, actor=None):
     if not current:
         return False, "No application found.", None
     return False, "Only a pending application can be withdrawn (current status: %s)." % current[1], current[0]
+
+
+# ---------------------------------------------------------------------------
+# Durable Draft State & Cryptographic Hash Binding
+# ---------------------------------------------------------------------------
+
+def ensure_drafts_table(conn):
+    """Idempotently ensures the drafts table and indexes exist."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS drafts (
+            draft_id        VARCHAR(64) PRIMARY KEY,
+            citizen_id      VARCHAR(64) NOT NULL,
+            payload         JSONB NOT NULL,
+            payload_hash    VARCHAR(64) NOT NULL,
+            scheme_version  VARCHAR(32) NOT NULL DEFAULT 'v1.0',
+            status          VARCHAR(20) NOT NULL DEFAULT 'prepared',
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+            expires_at      TIMESTAMP NOT NULL,
+            submitted_at    TIMESTAMP,
+            application_id  INTEGER REFERENCES applications(id) ON DELETE SET NULL,
+            CONSTRAINT chk_draft_status CHECK (status IN ('prepared', 'submitted', 'withdrawn', 'expired'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_drafts_citizen_id ON drafts (citizen_id);
+        CREATE INDEX IF NOT EXISTS idx_drafts_expires_at ON drafts (expires_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_application_id ON drafts (application_id) WHERE application_id IS NOT NULL;
+    """)
+    conn.commit()
+    cur.close()
+
+
+def canonicalize_draft_payload(citizen_id, cleaned_data, scheme_version, expires_at_str):
+    """
+    Produces deterministic canonical JSON for draft validation & hashing.
+    Keys are sorted, types/whitespace normalized, and encoding is fixed UTF-8.
+    """
+    norm_fields = {}
+    for k, v in cleaned_data.items():
+        if isinstance(v, (datetime, date)):
+            norm_fields[k] = v.strftime("%Y-%m-%d")
+        elif v is None:
+            norm_fields[k] = ""
+        else:
+            norm_fields[k] = str(v).strip()
+
+    canonical_obj = {
+        "citizen_id": str(citizen_id).strip(),
+        "application_fields": norm_fields,
+        "scheme_version": str(scheme_version).strip(),
+        "expires_at": str(expires_at_str).strip(),
+    }
+    return json.dumps(canonical_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def compute_payload_hash(canonical_json):
+    """Returns SHA-256 hex digest of canonical JSON payload."""
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def create_draft(cur, citizen_id, cleaned_data, scheme_version="v1.0", ttl_minutes=30):
+    """
+    Creates a new prepared draft record in Postgres.
+    Supersedes (expires) any earlier prepared draft for the same citizen.
+    Returns (draft_id, payload_hash, confirmation_token, expires_at).
+    """
+    # Supersede existing prepared drafts for this citizen
+    cur.execute(
+        "UPDATE drafts SET status = 'expired' WHERE citizen_id = %s AND status = 'prepared'",
+        (citizen_id,)
+    )
+
+    draft_id = secrets.token_hex(16)  # 128-bit unguessable random ID
+    created_at = datetime.now()
+    expires_at = created_at + timedelta(minutes=ttl_minutes)
+    expires_at_str = expires_at.isoformat()
+
+    canonical_json = canonicalize_draft_payload(citizen_id, cleaned_data, scheme_version, expires_at_str)
+    payload_hash = compute_payload_hash(canonical_json)
+    payload_dict = json.loads(canonical_json)
+
+    cur.execute(
+        """INSERT INTO drafts (draft_id, citizen_id, payload, payload_hash, scheme_version,
+                               status, created_at, expires_at)
+           VALUES (%s, %s, %s, %s, %s, 'prepared', %s, %s)""",
+        (draft_id, citizen_id, json.dumps(payload_dict), payload_hash, scheme_version, created_at, expires_at)
+    )
+
+    confirmation_token = f"{draft_id}.{payload_hash}"
+    return draft_id, payload_hash, confirmation_token, expires_at
+
+
+def invalidate_citizen_drafts(cur, citizen_id, new_status="withdrawn"):
+    """Marks any outstanding prepared drafts for the citizen with new_status."""
+    cur.execute(
+        "UPDATE drafts SET status = %s WHERE citizen_id = %s AND status = 'prepared'",
+        (new_status, citizen_id)
+    )
+    return cur.rowcount
+
+
+def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
+    """
+    Submits a prepared draft in a single atomic database transaction.
+    Enforces row-level lock (FOR UPDATE), owner matching, non-expiry, single-use,
+    and cryptographic hash binding using hmac.compare_digest.
+    Returns (success: bool, result_dict: dict)
+    """
+    if cfg is None:
+        cfg = load_config()
+
+    cur = conn.cursor()
+    try:
+        # 1. Lock the draft row exclusively for this authenticated citizen
+        cur.execute(
+            """SELECT draft_id, citizen_id, payload, payload_hash, scheme_version,
+                      status, expires_at, application_id
+               FROM drafts
+               WHERE draft_id = %s AND citizen_id = %s
+               FOR UPDATE""",
+            (draft_id, citizen_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Draft not found or expired.",
+                "error_hi": "Aavedan draft nahi mila ya expire ho gaya hai."
+            }
+
+        d_id, c_id, payload_raw, stored_hash, scheme_ver, status, expires_at, app_id = row
+
+        # 2. Check lifecycle status (single use & validity)
+        if status == "submitted":
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "This draft has already been submitted.",
+                "error_hi": "Yeh draft pehle hi jama kiya ja chuka hai.",
+                "application_id": app_id
+            }
+
+        if status != "prepared":
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Draft is not in a submittable state (status: %s)." % status
+            }
+
+        # 3. Check expiry
+        now = datetime.now()
+        if now > expires_at:
+            cur.execute("UPDATE drafts SET status = 'expired' WHERE draft_id = %s", (d_id,))
+            conn.commit()
+            return False, {
+                "status": "error",
+                "error": "Draft has expired. Please prepare the application again.",
+                "error_hi": "Draft expire ho gaya hai. Kripya punah koshish karein."
+            }
+
+        # 4. Hash binding verification (tamper resistance)
+        payload_dict = payload_raw if isinstance(payload_raw, dict) else json.loads(payload_raw)
+        app_fields = payload_dict.get("application_fields", payload_dict)
+
+        canonical_str = canonicalize_draft_payload(
+            citizen_id=c_id,
+            cleaned_data=app_fields,
+            scheme_version=scheme_ver,
+            expires_at_str=expires_at.isoformat()
+        )
+        recomputed_hash = compute_payload_hash(canonical_str)
+
+        # Integrity check: stored payload must match stored hash
+        if not hmac.compare_digest(recomputed_hash, stored_hash):
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Draft payload integrity check failed (stored data tampered).",
+                "error_hi": "Draft data chhedchhad ki wajah se asweekar kiya gaya."
+            }
+
+        # Authenticity check: provided token/hash must match stored hash
+        if not hmac.compare_digest(provided_hash, stored_hash):
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Confirmation token/hash mismatch. Submission rejected.",
+                "error_hi": "Confirmation token aavedan data se match nahi hua."
+            }
+
+        # 5. Check active application rule at submission time
+        existing = active_application(cur, c_id)
+        if existing:
+            conn.rollback()
+            return False, {
+                "status": "error",
+                "error": "Active application %s already exists for this mobile number." % existing[1]
+            }
+
+        # 6. Insert new application row
+        cleaned = dict(app_fields)
+        if isinstance(cleaned.get("dob"), str):
+            dob_str = cleaned["dob"].strip()
+            parsed = parse_dob(dob_str)
+            if not parsed:
+                try:
+                    parsed = datetime.strptime(dob_str, "%Y-%m-%d").date()
+                except Exception:
+                    parsed = None
+            cleaned["dob"] = parsed
+
+        actor = "applicant:%s" % c_id
+        new_app_id, app_no = create_application(cur, c_id, cleaned, actor=actor)
+
+        # 7. Update draft status to submitted and record application_id
+        cur.execute(
+            """UPDATE drafts
+               SET status = 'submitted', submitted_at = %s, application_id = %s
+               WHERE draft_id = %s""",
+            (now, new_app_id, d_id)
+        )
+
+        conn.commit()
+
+        # Send confirmation SMS
+        send_sms(
+            c_id,
+            "Sewa Setu: application %s received. Track at the status portal with mobile no. and password (DOB as DDMMYYYY)." % app_no,
+            cfg
+        )
+
+        return True, {
+            "status": "submitted",
+            "application_number": app_no,
+            "applicant_name": cleaned.get("applicant_name", ""),
+            "submission_date": now.strftime("%d/%m/%Y %H:%M"),
+            "status_code": "PENDING",
+            "message": "Application %s successfully submitted." % app_no,
+            "message_hi": "Aapka aavedan kramank %s safaltapoorvak jama ho gaya hai." % app_no,
+            "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()

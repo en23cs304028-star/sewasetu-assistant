@@ -66,11 +66,13 @@ CITIZEN_TOOLS = [
     },
     {
         "name": "submit_application",
-        "description": "Submits the validated application using the confirmation_token returned by prepare_application. Accepts ONLY the confirmation_token. The assistant MUST confirm the citizen explicitly agreed before calling.",
+        "description": "Submits the validated application using the confirmation_token returned by prepare_application. Accepts the confirmation_token (or draft_id and hash). The assistant MUST confirm the citizen explicitly agreed before calling.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "confirmation_token": {"type": "string", "description": "Single-use confirmation token from prepare_application"}
+                "confirmation_token": {"type": "string", "description": "Single-use confirmation token from prepare_application (contains draft_id and payload hash)"},
+                "draft_id": {"type": "string", "description": "Optional draft_id if supplied separately from hash"},
+                "hash": {"type": "string", "description": "Optional payload hash if supplied separately from draft_id"}
             },
             "required": ["confirmation_token"]
         }
@@ -241,7 +243,9 @@ def handle_citizen_tool_call(tool_name, arguments, subject):
     elif tool_name == "submit_application":
         return citizen.submit_application(
             mobile=mobile,
-            confirmation_token=arguments.get("confirmation_token", "")
+            confirmation_token=arguments.get("confirmation_token", ""),
+            draft_id=arguments.get("draft_id"),
+            hash=arguments.get("hash")
         )
     elif tool_name == "withdraw_application":
         return citizen.withdraw_application(
