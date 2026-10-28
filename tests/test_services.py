@@ -264,6 +264,7 @@ class TestEvalDashboardRoute(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        os.environ.setdefault("ADMIN_PASSWORD", "test-admin-secret")
         sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app")))
         with patch.dict(sys.modules, {"psycopg2": MagicMock(), "fpdf": MagicMock()}):
             import app as flask_app
@@ -283,6 +284,18 @@ class TestEvalDashboardRoute(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             html = resp.get_data(as_text=True)
             self.assertIn("Sewa Setu — Persona Evaluation Dashboard", html)
+
+    def test_app_refuses_to_start_without_admin_password(self):
+        """Verify app refuses to start if ADMIN_PASSWORD environment variable is missing."""
+        import subprocess
+        res = subprocess.run(
+            [sys.executable, "-c", "import os; os.environ.pop('ADMIN_PASSWORD', None); import app"],
+            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app")),
+            capture_output=True,
+            text=True
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("ADMIN_PASSWORD environment variable must be set", res.stderr)
 
 
 if __name__ == "__main__":
