@@ -66,5 +66,5 @@
 1. Start portal: `python3 app/app.py` (port 8000).
 2. Start MCP server: `python3 mcp/server.py` (port 8010).
 3. Browser Tab 1: `http://localhost:8000/eval-dashboard`.
-4. Browser Tab 2: `http://localhost:8000/admin/queue` (login: `admin` / `SewaSetu@Assam2026!Review`).
+4. Browser Tab 2: `http://localhost:8000/admin/queue` (login: `admin` / `<ADMIN_PASSWORD from env>`).
 5. Terminal: Run `python3 -m unittest discover tests` (39 tests pass).

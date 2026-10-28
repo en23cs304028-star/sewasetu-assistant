@@ -9,3 +9,6 @@ venv/
 .pytest_cache/
 app/uploads/
 uploads/
+.env
+.env.*
+sewasetu-assistant.zip

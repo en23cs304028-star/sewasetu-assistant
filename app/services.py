@@ -37,12 +37,17 @@ def get_db(cfg=None):
     import psycopg2
     if cfg is None:
         cfg = load_config()
+    host = os.environ.get("PGHOST") or cfg.get("database", "host", fallback="localhost")
+    port = int(os.environ.get("PGPORT") or cfg.getint("database", "port", fallback=5432))
+    dbname = os.environ.get("PGDATABASE") or cfg.get("database", "name", fallback="sewasetu")
+    user = os.environ.get("PGUSER") or cfg.get("database", "user", fallback="sewasetu")
+    password = os.environ.get("PGPASSWORD") or cfg.get("database", "password", fallback="sewasetu123")
     return psycopg2.connect(
-        host=cfg.get("database", "host", fallback="localhost"),
-        port=cfg.getint("database", "port", fallback=5432),
-        dbname=cfg.get("database", "name", fallback="sewasetu"),
-        user=cfg.get("database", "user", fallback="sewasetu"),
-        password=cfg.get("database", "password", fallback="sewasetu123"),
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
     )
 
 
@@ -63,7 +68,7 @@ def new_application_no():
 def send_sms(mobile, text, cfg=None):
     if cfg is None:
         cfg = load_config()
-    gateway_url = cfg.get("app", "sms_gateway_url", fallback="http://localhost:8025")
+    gateway_url = os.environ.get("SMS_GATEWAY_URL") or cfg.get("app", "sms_gateway_url", fallback="http://localhost:8025")
     try:
         requests.post(gateway_url.rstrip("/") + "/api/send",
                       json={"to": mobile, "text": text}, timeout=5)
@@ -99,6 +104,9 @@ def get_scheme_info(cfg=None):
     delta = deadline - now_ist()
     hours_left = int(delta.total_seconds() // 3600) if delta.total_seconds() > 0 else 0
     is_open = delta.total_seconds() > 0
+    monthly_amount = cfg.getint("pension", "monthly_amount", fallback=None)
+    if monthly_amount is None:
+        monthly_amount = cfg.getint("pension", "monthly_pension_amount_inr", fallback=250)
     return {
         "min_age": min_age,
         "sla_days": sla_days,
@@ -107,7 +115,8 @@ def get_scheme_info(cfg=None):
         "is_open": is_open,
         "blocks": list(BLOCKS),
         "required_documents": ["Age proof (JPG, PNG or PDF up to 5 MB)"],
-        "monthly_pension_amount_inr": 1000,
+        "monthly_pension_amount_inr": monthly_amount,
+        "monthly_amount": monthly_amount,
     }
 
 

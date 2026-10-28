@@ -16,7 +16,7 @@ services:
       - "8000:8000"
     environment:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-SewaSetu@Assam2026!Review}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       # the address at which people reach this portal; stamped into sign-in tokens and
       # discovery documents, so it must be the public one when deployed
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}

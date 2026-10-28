@@ -20,6 +20,10 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import sys
+if os.path.join(BASE_DIR, "app") not in sys.path:
+    sys.path.insert(0, os.path.join(BASE_DIR, "app"))
+import services
 
 
 def load_config():
@@ -37,14 +41,7 @@ def get_public_keys_from_db():
     """Retrieve public keys for token verification directly from the database or JWKS cache."""
     cfg = load_config()
     try:
-        import psycopg2
-        conn = psycopg2.connect(
-            host=cfg.get("database", "host", fallback="localhost"),
-            port=cfg.getint("database", "port", fallback=5432),
-            dbname=cfg.get("database", "name", fallback="sewasetu"),
-            user=cfg.get("database", "user", fallback="sewasetu"),
-            password=cfg.get("database", "password", fallback="sewasetu123"),
-        )
+        conn = services.get_db()
         cur = conn.cursor()
         cur.execute("SELECT kid, private_pem FROM oauth_keys ORDER BY created_at ASC")
         rows = cur.fetchall()
