@@ -735,6 +735,116 @@ class TestDurableDraftsPostgres(unittest.TestCase):
             self.assertNotEqual(ids[i], ids[i + 1])
             self.assertEqual(len(ids[i]), 32)
 
+    def test_16_non_active_app_unique_violation_re_raised(self):
+        """Only uq_active_application_mobile is caught as friendly error; other UniqueViolations are re-raised."""
+        import psycopg2.errors
+        from unittest.mock import patch
+        mobile = "9990009001"
+        data = self.get_valid_prepare_data()
+
+        # Create two drafts
+        prep1 = citizen.prepare_application(mobile=mobile, **data)
+        draft_id1 = prep1["draft_id"]
+        token1 = prep1["confirmation_token"]
+
+        # Submit first draft to generate application 1
+        sub1 = citizen.submit_application(mobile=mobile, confirmation_token=token1)
+        self.assertEqual(sub1["status"], "submitted")
+
+        # Get existing application_id
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT application_id FROM drafts WHERE draft_id = %s", (draft_id1,))
+        app_id = cur.fetchone()[0]
+
+        # Withdraw application 1 so citizen is allowed to submit again
+        citizen.withdraw_application(mobile=mobile, confirm=True)
+
+        # Prepare draft 2
+        prep2 = citizen.prepare_application(mobile=mobile, **data)
+        draft_id2 = prep2["draft_id"]
+        hash2 = prep2["payload_hash"]
+
+        # Mock create_application to return the SAME application_id (app_id) as draft 1,
+        # which will trigger the partial unique index uq_drafts_application_id ON drafts(application_id)
+        with patch("services.create_application", return_value=(app_id, "SSP26999999")):
+            with self.assertRaises(psycopg2.errors.UniqueViolation) as cm:
+                services.submit_draft(conn, mobile, draft_id2, hash2)
+
+            # Assert the constraint that failed is uq_drafts_application_id, NOT active_application
+            self.assertEqual(cm.exception.diag.constraint_name, "uq_drafts_application_id")
+
+        cur.close()
+        conn.close()
+
+    def test_17_active_application_index_constant_drift(self):
+        """Index predicate on uq_active_application_mobile must exactly match ACTIVE_STATUSES in services.py."""
+        import re
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT indexdef FROM pg_indexes
+               WHERE tablename = 'applications' AND indexname = 'uq_active_application_mobile'"""
+        )
+        row = cur.fetchone()
+        self.assertIsNotNone(row, "Index uq_active_application_mobile must exist in PostgreSQL")
+        indexdef = row[0]
+        cur.close()
+        conn.close()
+
+        # Extract quoted uppercase statuses from indexdef
+        found_statuses = set(re.findall(r"'([A-Z_]+)'", indexdef))
+        self.assertEqual(
+            found_statuses,
+            set(services.ACTIVE_STATUSES),
+            f"Index predicate statuses {found_statuses} must match ACTIVE_STATUSES {services.ACTIVE_STATUSES}"
+        )
+
+    def test_18_sms_timeout_bounded_time(self):
+        """Slow SMS gateway times out within bounded time; submission succeeds with sms_sent=False."""
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import threading
+
+        class SlowSMSHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                time.sleep(2.5)
+                self.send_response(200)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+
+        slow_server = HTTPServer(("127.0.0.1", 8895), SlowSMSHandler)
+        server_thread = threading.Thread(target=slow_server.handle_request, daemon=True)
+        server_thread.start()
+
+        mobile = "9990009002"
+        data = self.get_valid_prepare_data()
+        prep = citizen.prepare_application(mobile=mobile, **data)
+        token = prep["confirmation_token"]
+
+        old_gateway = os.environ.get("SMS_GATEWAY_URL")
+        os.environ["SMS_GATEWAY_URL"] = "http://127.0.0.1:8895"
+
+        try:
+            # Patch default timeout to 1.0s to verify bounded timeout behavior
+            from unittest.mock import patch
+            orig_send_sms = services.send_sms
+            with patch("services.send_sms", side_effect=lambda m, t, cfg=None, timeout=5: orig_send_sms(m, t, cfg, timeout=1.0)):
+                start = time.time()
+                sub = citizen.submit_application(mobile=mobile, confirmation_token=token)
+                elapsed = time.time() - start
+
+            self.assertEqual(sub["status"], "submitted")
+            self.assertFalse(sub.get("sms_sent", True))
+            # Must finish well before slow server sleep (2.5s)
+            self.assertLess(elapsed, 2.0, f"Submission took {elapsed:.2f}s, expected < 2.0s bounded by timeout")
+        finally:
+            if old_gateway is not None:
+                os.environ["SMS_GATEWAY_URL"] = old_gateway
+            else:
+                os.environ.pop("SMS_GATEWAY_URL", None)
+            slow_server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

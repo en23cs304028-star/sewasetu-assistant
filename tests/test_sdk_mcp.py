@@ -204,6 +204,58 @@ class TestOfficialSDKMCP(unittest.TestCase):
 
         asyncio.run(run_pinned_versions())
 
+    def test_08_raw_http_protocol_version_2026_07_28(self):
+        """Raw-HTTP test for modern protocolVersion 2026-07-28 with MCP-Protocol-Version header."""
+        token = self.mint_token("9990001001", "citizen", f"{self.issuer}/mcp/citizen")
+        endpoint = f"{self.base_url}/mcp/citizen"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+
+        # 1. initialize request with protocolVersion 2026-07-28
+        init_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {"name": "raw-http-client", "version": "1.0"}
+            }
+        }
+        r1 = requests.post(endpoint, headers=headers, json=init_body, timeout=5)
+        self.assertEqual(r1.status_code, 200)
+        d1 = r1.json()
+        self.assertEqual(d1["result"]["protocolVersion"], "2026-07-28")
+        self.assertEqual(r1.headers.get("MCP-Protocol-Version"), "2026-07-28")
+
+        # 2. notifications/initialized with MCP-Protocol-Version header
+        h2 = dict(headers)
+        h2["MCP-Protocol-Version"] = "2026-07-28"
+        notif_body = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }
+        r2 = requests.post(endpoint, headers=h2, json=notif_body, timeout=5)
+        self.assertEqual(r2.status_code, 202)
+        self.assertEqual(r2.text, "")
+        self.assertEqual(r2.headers.get("MCP-Protocol-Version"), "2026-07-28")
+
+        # 3. tools/list with MCP-Protocol-Version header
+        list_body = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }
+        r3 = requests.post(endpoint, headers=h2, json=list_body, timeout=5)
+        self.assertEqual(r3.status_code, 200)
+        d3 = r3.json()
+        self.assertIn("tools", d3["result"])
+        self.assertEqual(len(d3["result"]["tools"]), 6)
+        self.assertEqual(r3.headers.get("MCP-Protocol-Version"), "2026-07-28")
+
 
 if __name__ == "__main__":
     unittest.main()

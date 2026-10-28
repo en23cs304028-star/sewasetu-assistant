@@ -306,15 +306,8 @@ def handle_submission():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        err_str = str(e)
-        is_unique_violation = False
-        try:
-            import psycopg2.errors
-            if isinstance(e, (psycopg2.IntegrityError, psycopg2.errors.UniqueViolation)):
-                is_unique_violation = True
-        except Exception:
-            pass
-        if is_unique_violation or "uq_active_application_mobile" in err_str:
+        import psycopg2.errors
+        if isinstance(e, psycopg2.errors.UniqueViolation) and getattr(getattr(e, "diag", None), "constraint_name", None) == "uq_active_application_mobile":
             cur.close(); conn.close()
             conn2 = get_db()
             cur2 = conn2.cursor()

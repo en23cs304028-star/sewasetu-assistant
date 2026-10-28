@@ -70,7 +70,7 @@ CITIZEN_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "confirmation_token": {"type": "string", "description": "Single-use confirmation token from prepare_application (contains draft_id and payload hash)"},
+                "confirmation_token": {"type": "string", "description": "Single-use confirmation token from prepare_application; copy the token exactly as returned, do not shorten or alter (contains draft_id and payload hash)"},
                 "draft_id": {"type": "string", "description": "Optional draft_id if supplied separately from hash"},
                 "hash": {"type": "string", "description": "Optional payload hash if supplied separately from draft_id"}
             },
@@ -389,6 +389,12 @@ def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
     session_id = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
     if session_id:
         resp.headers["Mcp-Session-Id"] = session_id
+
+    proto_ver = request.headers.get("MCP-Protocol-Version") or request.headers.get("mcp-protocol-version")
+    if proto_ver and proto_ver in SUPPORTED_PROTOCOL_VERSIONS:
+        resp.headers["MCP-Protocol-Version"] = proto_ver
+    elif isinstance(resp_data, dict) and "result" in resp_data and "protocolVersion" in resp_data["result"]:
+        resp.headers["MCP-Protocol-Version"] = resp_data["result"]["protocolVersion"]
 
     return resp
 

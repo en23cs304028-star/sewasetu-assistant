@@ -71,15 +71,20 @@ def new_application_no():
     return "SSP" + datetime.now().strftime("%y") + str(random.randint(100000, 999999))
 
 
-def send_sms(mobile, text, cfg=None):
+def send_sms(mobile, text, cfg=None, timeout=5):
     if cfg is None:
         cfg = load_config()
     gateway_url = os.environ.get("SMS_GATEWAY_URL") or cfg.get("app", "sms_gateway_url", fallback="http://localhost:8025")
     try:
-        requests.post(gateway_url.rstrip("/") + "/api/send",
-                      json={"to": mobile, "text": text}, timeout=5)
-    except Exception:
-        pass
+        resp = requests.post(
+            gateway_url.rstrip("/") + "/api/send",
+            json={"to": mobile, "text": text},
+            timeout=timeout
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.warning("SMS gateway delivery failed for %s: %s", mobile, e)
+        return False
 
 
 def write_audit(cur, app_id, action, actor, note=""):
@@ -553,15 +558,8 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        err_str = str(e)
-        is_unique_violation = False
-        try:
-            import psycopg2.errors
-            if isinstance(e, (psycopg2.IntegrityError, psycopg2.errors.UniqueViolation)):
-                is_unique_violation = True
-        except Exception:
-            pass
-        if is_unique_violation or "uq_active_application_mobile" in err_str:
+        import psycopg2.errors
+        if isinstance(e, psycopg2.errors.UniqueViolation) and getattr(getattr(e, "diag", None), "constraint_name", None) == "uq_active_application_mobile":
             cur2 = conn.cursor()
             existing = active_application(cur2, citizen_id)
             cur2.close()
@@ -583,14 +581,15 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
     # SMS delivery outside the DB transaction so gateway errors don't fail submission
     sms_sent = False
     try:
-        send_sms(
+        sms_sent = bool(send_sms(
             citizen_id,
             "Sewa Setu: application %s received. Track at the status portal with mobile no. and password (DOB as DDMMYYYY)." % app_no,
-            cfg
-        )
-        sms_sent = True
+            cfg,
+            timeout=5
+        ))
     except Exception as e:
         logger.warning("Failed to send confirmation SMS to %s for application %s: %s", citizen_id, app_no, e)
+        sms_sent = False
 
     return True, {
         "status": "submitted",
