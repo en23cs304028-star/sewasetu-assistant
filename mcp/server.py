@@ -11,8 +11,6 @@ Supports standard MCP JSON-RPC 2.0 over HTTP POST and Server-Sent Events (SSE).
 import os
 import sys
 import json
-import uuid
-import queue
 import threading
 from urllib.parse import urlparse
 from flask import Flask, request, Response, jsonify
@@ -26,9 +24,6 @@ import citizen
 import officer
 
 app = Flask(__name__)
-
-# Active SSE sessions: session_id -> queue.Queue
-SSE_SESSIONS = {}
 
 # Citizen tool schemas (6 tools)
 CITIZEN_TOOLS = [
@@ -170,7 +165,7 @@ def authenticate_request(role, endpoint_path):
     Returns (authenticated: bool, error_response: Response or None, subject: str or None)
     """
     auth_header = request.headers.get("Authorization", "")
-    metadata_url = auth.get_public_base_url() + "/.well-known/oauth-protected-resource"
+    metadata_url = auth.get_public_base_url() + "/.well-known/oauth-protected-resource" + endpoint_path
 
     if not auth_header.startswith("Bearer "):
         resp = jsonify({
@@ -186,13 +181,15 @@ def authenticate_request(role, endpoint_path):
 
     valid, result = auth.verify_token(token, expected_resource=canonical_resource, expected_role=role)
     if not valid:
-        status_code = 403 if "forbidden" in str(result) else 401
+        is_forbidden = "forbidden" in str(result)
+        status_code = 403 if is_forbidden else 401
+        error_code = "insufficient_scope" if is_forbidden else "invalid_token"
         resp = jsonify({
-            "error": "invalid_token",
+            "error": error_code,
             "error_description": str(result)
         })
         resp.status_code = status_code
-        resp.headers["WWW-Authenticate"] = 'Bearer error="invalid_token", error_description="%s", resource_metadata="%s"' % (result, metadata_url)
+        resp.headers["WWW-Authenticate"] = 'Bearer error="%s", error_description="%s", resource_metadata="%s"' % (error_code, result, metadata_url)
         return False, resp, None
 
     sub = result.get("sub", "")
@@ -211,7 +208,7 @@ def protected_resource_metadata(subpath=""):
         from urllib.parse import urlparse
         path = urlparse(resource_param).path
     else:
-        path = "/" + subpath if subpath else ""
+        path = "/" + subpath.strip("/") if subpath.strip("/") else ""
     doc = auth.get_protected_resource_metadata(path)
     return jsonify(doc)
 
@@ -287,22 +284,36 @@ def handle_officer_tool_call(tool_name, arguments, subject):
         return {"error": "Unknown tool: %s" % tool_name}
 
 
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    "2026-07-28"
+)
+
+
 def process_jsonrpc(req_data, tools_list, tool_handler, subject):
     req_id = req_data.get("id")
     method = req_data.get("method")
-    params = req_data.get("params", {})
+    params = req_data.get("params", {}) or {}
 
     if method == "initialize":
+        client_version = params.get("protocolVersion")
+        negotiated = client_version if client_version in SUPPORTED_PROTOCOL_VERSIONS else "2024-11-05"
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": negotiated,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "sewasetu-mcp", "version": "1.0.0"}
             }
         }
     elif method == "notifications/initialized":
+        return None
+    elif req_id is None:
+        # Any JSON-RPC notification
         return None
     elif method == "tools/list":
         return {
@@ -312,7 +323,7 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
         }
     elif method == "tools/call":
         tool_name = params.get("name")
-        args = params.get("arguments", {})
+        args = params.get("arguments", {}) or {}
         try:
             res = tool_handler(tool_name, args, subject)
             return {
@@ -331,6 +342,12 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
                     "content": [{"type": "text", "text": "Error executing tool: %s" % e}]
                 }
             }
+    elif method == "ping":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {}
+        }
     else:
         return {
             "jsonrpc": "2.0",
@@ -340,108 +357,46 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints: /mcp/citizen and /mcp/officer
+# Endpoints: /mcp/citizen and /mcp/officer (Streamable HTTP, stateless)
 # ---------------------------------------------------------------------------
+
+def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
+    if request.method == "GET":
+        resp = jsonify({
+            "error": "method_not_allowed",
+            "message": "Streamable HTTP MCP endpoints accept POST only."
+        })
+        resp.status_code = 405
+        resp.headers["Allow"] = "POST"
+        return resp
+
+    ok, err_resp, subject = authenticate_request(role, endpoint_path)
+    if not ok:
+        return err_resp
+
+    req_data = request.get_json(force=True, silent=True) or {}
+    resp_data = process_jsonrpc(req_data, tools_list, tool_handler, subject)
+    if resp_data is None:
+        # Notifications get HTTP 202 with no body
+        resp = Response("", status=202, mimetype="application/json")
+    else:
+        resp = jsonify(resp_data)
+
+    session_id = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
+    if session_id:
+        resp.headers["Mcp-Session-Id"] = session_id
+
+    return resp
+
 
 @app.route("/mcp/citizen", methods=["GET", "POST"])
 def mcp_citizen():
-    ok, err_resp, subject = authenticate_request("citizen", "/mcp/citizen")
-    if not ok:
-        return err_resp
-
-    if request.method == "POST":
-        req_data = request.get_json(force=True, silent=True) or {}
-        resp_data = process_jsonrpc(req_data, CITIZEN_TOOLS, handle_citizen_tool_call, subject)
-        if resp_data is None:
-            return ("", 204)
-        return jsonify(resp_data)
-
-    # SSE connection for clients that connect with GET
-    session_id = str(uuid.uuid4())
-    q = queue.Queue()
-    SSE_SESSIONS[session_id] = q
-
-    def stream():
-        # First event: endpoint for posting messages
-        endpoint_event = {
-            "event": "endpoint",
-            "data": "%s/mcp/citizen/messages?session_id=%s" % (auth.get_public_base_url(), session_id)
-        }
-        yield "event: %s\ndata: %s\n\n" % (endpoint_event["event"], endpoint_event["data"])
-        while True:
-            try:
-                msg = q.get(timeout=30)
-                yield "event: message\ndata: %s\n\n" % json.dumps(msg)
-            except queue.Empty:
-                yield ": keepalive\n\n"
-
-    return Response(stream(), mimetype="text/event-stream")
-
-
-@app.route("/mcp/citizen/messages", methods=["POST"])
-def mcp_citizen_messages():
-    ok, err_resp, subject = authenticate_request("citizen", "/mcp/citizen")
-    if not ok:
-        return err_resp
-
-    session_id = request.args.get("session_id")
-    req_data = request.get_json(force=True, silent=True) or {}
-    resp_data = process_jsonrpc(req_data, CITIZEN_TOOLS, handle_citizen_tool_call, subject)
-
-    if session_id and session_id in SSE_SESSIONS and resp_data is not None:
-        SSE_SESSIONS[session_id].put(resp_data)
-        return ("", 202)
-    return jsonify(resp_data) if resp_data is not None else ("", 204)
+    return _handle_mcp_request("citizen", "/mcp/citizen", CITIZEN_TOOLS, handle_citizen_tool_call)
 
 
 @app.route("/mcp/officer", methods=["GET", "POST"])
 def mcp_officer():
-    ok, err_resp, subject = authenticate_request("officer", "/mcp/officer")
-    if not ok:
-        return err_resp
-
-    if request.method == "POST":
-        req_data = request.get_json(force=True, silent=True) or {}
-        resp_data = process_jsonrpc(req_data, OFFICER_TOOLS, handle_officer_tool_call, subject)
-        if resp_data is None:
-            return ("", 204)
-        return jsonify(resp_data)
-
-    # SSE connection
-    session_id = str(uuid.uuid4())
-    q = queue.Queue()
-    SSE_SESSIONS[session_id] = q
-
-    def stream():
-        endpoint_event = {
-            "event": "endpoint",
-            "data": "%s/mcp/officer/messages?session_id=%s" % (auth.get_public_base_url(), session_id)
-        }
-        yield "event: %s\ndata: %s\n\n" % (endpoint_event["event"], endpoint_event["data"])
-        while True:
-            try:
-                msg = q.get(timeout=30)
-                yield "event: message\ndata: %s\n\n" % json.dumps(msg)
-            except queue.Empty:
-                yield ": keepalive\n\n"
-
-    return Response(stream(), mimetype="text/event-stream")
-
-
-@app.route("/mcp/officer/messages", methods=["POST"])
-def mcp_officer_messages():
-    ok, err_resp, subject = authenticate_request("officer", "/mcp/officer")
-    if not ok:
-        return err_resp
-
-    session_id = request.args.get("session_id")
-    req_data = request.get_json(force=True, silent=True) or {}
-    resp_data = process_jsonrpc(req_data, OFFICER_TOOLS, handle_officer_tool_call, subject)
-
-    if session_id and session_id in SSE_SESSIONS and resp_data is not None:
-        SSE_SESSIONS[session_id].put(resp_data)
-        return ("", 202)
-    return jsonify(resp_data) if resp_data is not None else ("", 204)
+    return _handle_mcp_request("officer", "/mcp/officer", OFFICER_TOOLS, handle_officer_tool_call)
 
 
 if __name__ == "__main__":

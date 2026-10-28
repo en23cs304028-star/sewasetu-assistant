@@ -162,6 +162,35 @@ def jwks():
     return jsonify(public_jwks())
 
 
+@oauth.get("/.well-known/oauth-protected-resource")
+@oauth.get("/.well-known/oauth-protected-resource/<path:subpath>")
+def protected_resource_metadata(subpath=""):
+    resource_param = request.args.get("resource")
+    if resource_param:
+        path = urlparse(resource_param).path
+    else:
+        path = "/" + subpath.strip("/") if subpath.strip("/") else ""
+
+    clean_path = ("/" + path.strip("/")) if path.strip("/") else ""
+    if clean_path in ("/mcp/citizen", "mcp/citizen"):
+        canonical_resource = ISSUER + "/mcp/citizen"
+        scopes = ["citizen"]
+    elif clean_path in ("/mcp/officer", "mcp/officer"):
+        canonical_resource = ISSUER + "/mcp/officer"
+        scopes = ["officer"]
+    else:
+        canonical_resource = ISSUER
+        scopes = ["citizen", "officer"]
+
+    return jsonify({
+        "resource": canonical_resource,
+        "authorization_servers": [ISSUER],
+        "scopes_supported": scopes,
+        "bearer_methods_supported": ["header"],
+        "resource_documentation": ISSUER + "/about"
+    })
+
+
 @oauth.after_app_request
 def _cors(resp):
     # Discovery, registration and token endpoints may be called from browser-based clients.

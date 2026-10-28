@@ -86,29 +86,31 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
         return False, "signing_key_not_found"
 
     try:
-        # Decode and verify signature, issuer, and audience
+        # First verify signature, issuer, and expiration without enforcing audience yet
         claims = jwt.decode(
             token,
             pub_key,
             algorithms=["RS256"],
-            audience=expected_resource,
             issuer=issuer,
-            options={"require": ["exp", "iss", "aud", "sub"]}
+            options={"verify_aud": False, "require": ["exp", "iss", "sub"]}
         )
     except jwt.ExpiredSignatureError:
         return False, "token_expired"
-    except jwt.InvalidAudienceError:
-        return False, "invalid_audience"
     except jwt.InvalidIssuerError:
         return False, "invalid_issuer"
     except Exception as e:
         return False, "token_verification_failed: %s" % e
 
-    # Role and scope checks
+    # Role and scope checks (role mismatch is forbidden -> 403)
     if expected_role:
         token_role = claims.get("role") or claims.get("scope")
         if token_role != expected_role:
             return False, "forbidden: expected role %s, got %s" % (expected_role, token_role)
+
+    # Audience check: must match canonical endpoint resource URL
+    token_aud = claims.get("aud")
+    if expected_resource and token_aud != expected_resource:
+        return False, "invalid_audience: expected %s, got %s" % (expected_resource, token_aud)
 
     # Absolute session end check if present
     if "session_ends" in claims:
@@ -121,15 +123,16 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
 def get_protected_resource_metadata(resource_path=""):
     """RFC 9728 Protected Resource Metadata document for an endpoint."""
     base_url = get_public_base_url()
-    if not resource_path or resource_path == "/":
-        canonical_resource = base_url
-        scopes = ["citizen", "officer"]
-    elif "officer" in resource_path:
-        canonical_resource = base_url + resource_path
+    clean_path = ("/" + resource_path.strip("/")) if resource_path.strip("/") else ""
+    if clean_path in ("/mcp/citizen", "mcp/citizen"):
+        canonical_resource = base_url + "/mcp/citizen"
+        scopes = ["citizen"]
+    elif clean_path in ("/mcp/officer", "mcp/officer"):
+        canonical_resource = base_url + "/mcp/officer"
         scopes = ["officer"]
     else:
-        canonical_resource = base_url + resource_path
-        scopes = ["citizen"]
+        canonical_resource = base_url
+        scopes = ["citizen", "officer"]
 
     return {
         "resource": canonical_resource,
@@ -144,14 +147,7 @@ def revoke_citizen_session(mobile):
     """Revoke all active refresh tokens for a citizen when signing out."""
     cfg = load_config()
     try:
-        import psycopg2
-        conn = psycopg2.connect(
-            host=cfg.get("database", "host", fallback="localhost"),
-            port=cfg.getint("database", "port", fallback=5432),
-            dbname=cfg.get("database", "name", fallback="sewasetu"),
-            user=cfg.get("database", "user", fallback="sewasetu"),
-            password=cfg.get("database", "password", fallback="sewasetu123"),
-        )
+        conn = services.get_db(cfg)
         cur = conn.cursor()
         subject = "citizen:%s" % mobile
         cur.execute("UPDATE oauth_refresh_tokens SET revoked_at = %s WHERE subject = %s AND revoked_at IS NULL",
