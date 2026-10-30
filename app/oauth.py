@@ -29,6 +29,8 @@ import time
 import base64
 import hashlib
 import secrets
+import socket
+import ipaddress
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse
 
@@ -253,7 +255,81 @@ def redirect_allowed(registered, uri):
 
 
 def _is_url_client(client_id):
-    return client_id.startswith("https://") or client_id.startswith("http://localhost")
+    if not isinstance(client_id, str):
+        return False
+    return client_id.startswith("https://")
+
+
+def _fetch_client_metadata(client_id):
+    """
+    Safely fetch RFC 7591 / OAuth 2.1 client metadata document with comprehensive SSRF protection:
+      - HTTPS only
+      - Resolve DNS and block loopback, private, link-local, multicast, reserved, and IPv6 equivalents
+      - Block Docker container service names
+      - Disallow redirects (allow_redirects=False)
+      - 3-second timeout
+      - 64 KB response body cap
+      - application/json Content-Type only
+      - No credentials forwarded
+    """
+    if not isinstance(client_id, str) or not client_id.startswith("https://"):
+        return None
+
+    try:
+        u = urlparse(client_id)
+        if u.scheme != "https":
+            return None
+        host = u.hostname
+        if not host:
+            return None
+        if host.lower() in ("db", "mcp", "app", "smsgw", "localhost"):
+            return None
+        port = u.port or 443
+
+        # Resolve DNS and block loopback, private, link-local and IPv6 equivalents
+        addrinfo = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        for _, _, _, _, sockaddr in addrinfo:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if (ip.is_loopback or ip.is_private or ip.is_link_local or
+                ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+                return None
+
+        # 3-second timeout, no redirects, clean headers (no credentials)
+        resp = http.get(
+            client_id,
+            timeout=3,
+            allow_redirects=False,
+            headers={"Accept": "application/json"}
+        )
+
+        # Reject redirects
+        if getattr(resp, "is_redirect", False) or resp.status_code != 200:
+            return None
+
+        # Validate Content-Type is application/json
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if "application/json" not in content_type:
+            return None
+
+        # 64 KB response cap
+        MAX_SIZE = 64 * 1024
+        body = bytearray()
+        if hasattr(resp, "iter_content"):
+            for chunk in resp.iter_content(chunk_size=4096):
+                body.extend(chunk)
+                if len(body) > MAX_SIZE:
+                    return None
+            doc = json.loads(body.decode("utf-8"))
+        else:
+            if hasattr(resp, "content") and len(resp.content) > MAX_SIZE:
+                return None
+            doc = resp.json()
+
+        if doc.get("client_id") != client_id or not isinstance(doc.get("redirect_uris"), list):
+            return None
+        return doc
+    except Exception:
+        return None
 
 
 def load_client(client_id):
@@ -268,12 +344,8 @@ def load_client(client_id):
         return {"client_id": row[0], "client_name": row[1], "redirect_uris": row[2],
                 "secret_hash": row[3], "kind": row[4]}
     if _is_url_client(client_id):
-        try:
-            doc = http.get(client_id, timeout=5, headers={"Accept": "application/json"}).json()
-        except Exception:
-            cur.close(); conn.close()
-            return None
-        if doc.get("client_id") != client_id or not isinstance(doc.get("redirect_uris"), list):
+        doc = _fetch_client_metadata(client_id)
+        if not doc:
             cur.close(); conn.close()
             return None
         cur.execute("INSERT INTO oauth_clients (client_id, client_name, redirect_uris, secret_hash, "
