@@ -142,15 +142,13 @@ class TestThreatAProtocol(unittest.TestCase):
         self.assertNotEqual(resp.status_code, 500, "Server crashed with HTTP 500 on batch array")
 
     def test_a8_deeply_nested_json(self):
-        """Server should gracefully handle or reject deeply nested JSON without blowing recursion stack."""
-        nested = {"a": None}
-        curr = nested
-        for _ in range(100):
-            curr["a"] = {"b": None}
-            curr = curr["a"]
-        payload = {"jsonrpc": "2.0", "id": 50, "method": "tools/call", "params": {"name": "get_scheme_info", "arguments": nested}}
-        resp = self.app.post("/mcp/citizen", headers=self.headers, json=payload)
-        self.assertIn(resp.status_code, (200, 400))
+        """[FAIL EXPECTED] Server should reject 100,000-deep nested JSON cleanly without unhandled RecursionError 500."""
+        nested_bytes = b'{"a":' * 100000 + b'"val"' + b'}' * 100000
+        resp = self.app.post("/mcp/citizen", headers=self.headers, data=nested_bytes)
+        self.assertNotEqual(
+            resp.status_code, 500,
+            "100,000-deep nested JSON caused unhandled RecursionError resulting in HTTP 500"
+        )
 
     def test_a9_enforce_body_size_limit(self):
         """[FAIL EXPECTED] 5 MB garbage payload should be rejected with HTTP 413 Payload Too Large."""
@@ -189,3 +187,4 @@ class TestThreatAProtocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -155,7 +155,7 @@ class TestThreatDLoginOTP(unittest.TestCase):
         )
 
     def test_d7_user_enumeration_by_message(self):
-        """[FAIL EXPECTED] Differential messages must not leak whether a citizen has an existing application."""
+        """[FAIL EXPECTED] Error messages must be completely uniform across known and unknown users across all endpoints."""
         registered_mobile = "9998887711"
         conn = portal.get_db()
         cur = conn.cursor()
@@ -170,7 +170,7 @@ class TestThreatDLoginOTP(unittest.TestCase):
         cur.close()
         conn.close()
 
-        # Submit portal application for existing registered mobile
+        # 1. Portal declaration flow: differential message leaks application existence
         with self.app.session_transaction() as sess:
             sess["verified_mobile"] = registered_mobile
             sess["captcha_answer"] = 10
@@ -181,6 +181,29 @@ class TestThreatDLoginOTP(unittest.TestCase):
             }
         resp = self.app.post("/declaration", data={"declaration": "on"}, follow_redirects=True)
         html = resp.get_data(as_text=True)
+
+        # 2. OAuth OTP request path: responses must be identical for known and unknown mobiles
+        rid = self._create_oauth_request(role="citizen")
+        resp_known = self.app.post(f"/oauth/login?rid={rid}", data={"mobile": registered_mobile})
+        rid_unknown = self._create_oauth_request(role="citizen")
+        resp_unknown = self.app.post(f"/oauth/login?rid={rid_unknown}", data={"mobile": "9990000000"})
+        self.assertEqual(
+            resp_known.status_code, resp_unknown.status_code,
+            "OAuth OTP request returned different status codes for known vs unknown mobile numbers"
+        )
+
+        # 3. Officer login path: unknown username vs known username
+        rid_officer = self._create_oauth_request(role="officer")
+        resp_off_known = self.app.post(f"/oauth/login?rid={rid_officer}", data={"username": "admin", "password": "wrong"})
+        resp_off_unknown = self.app.post(f"/oauth/login?rid={rid_officer}", data={"username": "nonexistent_officer", "password": "wrong"})
+        self.assertEqual(
+            resp_off_known.status_code, resp_off_unknown.status_code,
+            "Officer login returned different status codes for known vs unknown username"
+        )
+        self.assertEqual(
+            resp_off_known.get_data(as_text=True), resp_off_unknown.get_data(as_text=True),
+            "Officer login returned different response bodies for known vs unknown username"
+        )
 
         # Clean up
         conn = portal.get_db()
@@ -197,20 +220,59 @@ class TestThreatDLoginOTP(unittest.TestCase):
         )
 
     def test_d8_user_enumeration_by_timing(self):
-        """Portal login timing should be consistent for existing vs non-existing users."""
-        # Non-existing user timing
-        t0 = time.time()
-        self.app.post("/status", data={"mobile": "0000000000", "password": "wrongpassword"})
-        t_non_existing = time.time() - t0
+        """Timing difference between known and unknown identities must be <= 50 ms across 20 samples."""
+        import statistics
 
-        # Existing admin user timing (or portal user)
-        t0 = time.time()
-        self.app.post("/status", data={"mobile": "9998881234", "password": "wrongpassword"})
-        t_existing = time.time() - t0
+        def get_median_latency(request_fn, samples=20):
+            times = []
+            for _ in range(samples):
+                t0 = time.perf_counter()
+                request_fn()
+                times.append(time.perf_counter() - t0)
+            return statistics.median(times)
 
-        # Timing difference should be small (< 0.5s) to prevent timing oracle
-        self.assertLess(abs(t_existing - t_non_existing), 0.5)
+        # 1. Status portal login timing
+        med_non_existing = get_median_latency(
+            lambda: self.app.post("/status", data={"mobile": "0000000000", "password": "wrongpassword"})
+        )
+        med_existing = get_median_latency(
+            lambda: self.app.post("/status", data={"mobile": "9998881234", "password": "wrongpassword"})
+        )
+        diff_portal = abs(med_existing - med_non_existing)
+        self.assertLess(
+            diff_portal, 0.050,
+            f"Status login timing difference ({diff_portal*1000:.1f}ms) exceeds 50ms threshold (timing oracle)"
+        )
+
+        # 2. Officer login timing
+        rid = self._create_oauth_request(role="officer")
+        med_off_unknown = get_median_latency(
+            lambda: self.app.post(f"/oauth/login?rid={rid}", data={"username": "nobody", "password": "wrongpassword"})
+        )
+        med_off_known = get_median_latency(
+            lambda: self.app.post(f"/oauth/login?rid={rid}", data={"username": "admin", "password": "wrongpassword"})
+        )
+        diff_officer = abs(med_off_known - med_off_unknown)
+        self.assertLess(
+            diff_officer, 0.050,
+            f"Officer login timing difference ({diff_officer*1000:.1f}ms) exceeds 50ms threshold (timing oracle)"
+        )
+
+        # 3. OAuth OTP request timing
+        rid_c = self._create_oauth_request(role="citizen")
+        med_otp_unknown = get_median_latency(
+            lambda: self.app.post(f"/oauth/login?rid={rid_c}", data={"mobile": "0000000000"})
+        )
+        med_otp_known = get_median_latency(
+            lambda: self.app.post(f"/oauth/login?rid={rid_c}", data={"mobile": "9998881234"})
+        )
+        diff_otp = abs(med_otp_known - med_otp_unknown)
+        self.assertLess(
+            diff_otp, 0.050,
+            f"OAuth OTP request timing difference ({diff_otp*1000:.1f}ms) exceeds 50ms threshold (timing oracle)"
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
+

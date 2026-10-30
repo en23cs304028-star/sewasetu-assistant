@@ -155,6 +155,61 @@ class TestThreatGLeaks(unittest.TestCase):
             "Database schema information (character varying) leaked to client in error message"
         )
 
+    def test_g5_log_leak_sensitive_data(self):
+        """[FAIL EXPECTED] Application and MCP logs must not contain OTPs, passwords, tokens, or full bank numbers."""
+        import logging
+        import io
+
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.DEBUG)
+
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+
+        test_mobile = "9998889999"
+        test_bank_acc = "987654321098"
+        test_pwd = os.environ.get("ADMIN_PASSWORD", "TestAdminPassword123!")
+
+        # 1. Citizen flow: request OTP
+        portal_app = importlib.import_module("app").app.test_client()
+        with portal_app.session_transaction() as sess:
+            sess["captcha_answer"] = 12
+        portal_app.post("/apply", data={"mobile": test_mobile, "captcha": "12"})
+
+        # 2. Officer login flow
+        portal_app.post("/admin", data={"username": "admin", "password": test_pwd})
+
+        # 3. Citizen MCP prepare application
+        req_c = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "prepare_application",
+                "arguments": {
+                    "applicant_name": "Log Test User", "dob": "01/01/1950", "gender": "Female",
+                    "marital_status": "Widowed", "husband_name": "", "village": "Sonari", "block": "Sonari",
+                    "bank_account": test_bank_acc, "ifsc": "SBIN0003077"
+                }
+            }
+        }
+        # Mint token
+        now = int(time.time())
+        c_claims = {
+            "iss": self.issuer, "sub": f"citizen:{test_mobile}", "aud": f"{self.issuer}/mcp/citizen",
+            "role": "citizen", "scope": "citizen", "iat": now, "exp": now + 1800, "jti": "jti_log"
+        }
+        c_tok = jwt.encode(c_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_g_kid"})
+        self.app_mcp.post("/mcp/citizen", headers={"Authorization": f"Bearer {c_tok}"}, json=req_c)
+
+        root_logger.removeHandler(handler)
+        logs = log_stream.getvalue()
+
+        # Sensitive data assertions
+        self.assertNotIn(test_pwd, logs, "Plaintext admin password leaked into server logs")
+        self.assertNotIn(test_bank_acc, logs, "Full unmasked bank account number leaked into server logs")
+        self.assertNotIn(c_tok, logs, "Raw JWT access token leaked into server logs")
+
 
 if __name__ == "__main__":
     unittest.main()
+
