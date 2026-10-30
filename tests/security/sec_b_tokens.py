@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_b_tokens.py: Threat B - Token Security & Validation Tests
+tests/security/sec_b_tokens.py: Threat B - Token Security & Validation Tests
 Checks:
-  - Expired tokens rejected
-  - Wrong signing key rejected
-  - alg=none rejected
-  - HS256 key confusion attack rejected
-  - Wrong issuer / audience rejected
-  - Tampered role rejected
-  - Missing exp rejected
+  - Expired tokens rejected (PASS)
+  - Wrong signing key rejected (PASS)
+  - alg=none rejected (PASS)
+  - HS256 key confusion attack rejected (PASS)
+  - Wrong issuer rejected (PASS)
+  - Wrong audience rejected (PASS)
+  - Tampered role rejected (PASS)
+  - Missing exp rejected (PASS)
   - Missing jti rejected (FAIL EXPECTED: jti not enforced in verify_token)
   - Unknown kid not in JWKS rejected (FAIL EXPECTED: fallback to key[0] accepts unknown kid)
   - Token still working after sign_out / revoke (FAIL EXPECTED: access token stateless, not blocklisted)
-  - One citizen's token used for another citizen's data (PASS: rejected)
+  - One citizen's token used for another citizen's data (PASS)
 """
 
 import os
@@ -132,7 +133,6 @@ class TestThreatBTokens(unittest.TestCase):
             "exp": now + 1800,
             "jti": "b4_hs256"
         }
-        # Use symmetric HMAC key (algorithm confusion attempt)
         token = jwt.encode(claims, key="symmetric-secret-key-attacker", algorithm="HS256", headers={"kid": "trusted_kid_1"})
         resp = self.app.post("/mcp/citizen", headers={"Authorization": f"Bearer {token}"},
                              json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -187,7 +187,6 @@ class TestThreatBTokens(unittest.TestCase):
             "jti": "b7_tamper"
         }
         token = self._mint_token(claims)
-        # Modify middle part (claims)
         header_b64, payload_b64, sig_b64 = token.split(".")
         payload = json.loads(jwt.utils.base64url_decode(payload_b64).decode("utf-8"))
         payload["role"] = "officer"
@@ -224,12 +223,10 @@ class TestThreatBTokens(unittest.TestCase):
             "role": "citizen",
             "iat": now,
             "exp": now + 1800
-            # jti intentionally omitted
         }
         token = self._mint_token(claims)
         resp = self.app.post("/mcp/citizen", headers={"Authorization": f"Bearer {token}"},
                              json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        # In current mcp/auth.py, require: ["exp", "iss", "sub"] does not enforce "jti"
         self.assertEqual(
             resp.status_code, 401,
             "Server accepted access token without 'jti' claim (replay prevention missing)"
@@ -247,7 +244,6 @@ class TestThreatBTokens(unittest.TestCase):
             "exp": now + 1800,
             "jti": "b10_bogus_kid"
         }
-        # Signed with our key, but kid is bogus
         token = self._mint_token(claims, kid="unknown_bogus_kid")
         resp = self.app.post("/mcp/citizen", headers={"Authorization": f"Bearer {token}"},
                              json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -279,7 +275,7 @@ class TestThreatBTokens(unittest.TestCase):
         resp = self.app.post("/mcp/citizen", headers=headers, json=sign_out_req)
         self.assertEqual(resp.status_code, 200)
 
-        # Subsequent call with the same access token must be rejected (revoked / signed out)
+        # Subsequent call with the same access token must be rejected
         list_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
         resp2 = self.app.post("/mcp/citizen", headers=headers, json=list_req)
         self.assertEqual(
@@ -288,10 +284,9 @@ class TestThreatBTokens(unittest.TestCase):
         )
 
     def test_b12_one_citizen_token_used_for_another_citizen_data(self):
-        """A citizen token for mobile 9990001001 cannot submit or withdraw data belonging to 9990001002."""
+        """A citizen token for mobile 9990001001 cannot submit data belonging to 9990001002."""
         conn = services.get_db()
         cur = conn.cursor()
-        # Create draft for 9990001002
         draft_id, p_hash, conf_token, _ = services.create_draft(
             cur, "9990001002",
             {"applicant_name": "Other User", "dob": "01/01/1950", "village": "Sonari", "block": "Sonari",
@@ -301,7 +296,6 @@ class TestThreatBTokens(unittest.TestCase):
         cur.close()
         conn.close()
 
-        # Token for 9990001001
         now = int(time.time())
         claims = {
             "iss": self.issuer,
@@ -323,7 +317,6 @@ class TestThreatBTokens(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         content = data.get("result", {}).get("content", [{}])[0].get("text", "")
-        # Must fail because draft is not owned by 9990001001
         self.assertTrue("Draft not found or expired" in content or "error" in content)
 
 

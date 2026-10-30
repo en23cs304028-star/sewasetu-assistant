@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_h_agent_level.py: Threat H - Agent-Level Stored Prompt Injection
+tests/security/sec_h_agent_level.py: Threat H - Agent-Level Stored Prompt Injection
 Checks:
-  - Stored prompt injection in applicant_name and village returned to officer LLM in list_applications (FAIL EXPECTED)
-  - Raw unescaped user injection payload in get_application without <untrusted_user_input> delimiters (FAIL EXPECTED)
+  - Stored prompt injection in applicant_name and village returned to officer LLM in list_applications (FAIL EXPECTED: H-01)
+  - Raw unescaped user injection payload in get_application without <untrusted_user_input> delimiters (FAIL EXPECTED: H-02)
 """
 
 import os
@@ -85,7 +85,6 @@ class TestThreatHAgentLevel(unittest.TestCase):
         data = resp.get_json()
         raw_text = data.get("result", {}).get("content", [{}])[0].get("text", "")
 
-        # Clean up
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM applications WHERE id = %s", (app_id,))
@@ -93,7 +92,6 @@ class TestThreatHAgentLevel(unittest.TestCase):
         cur.close()
         conn.close()
 
-        # To protect LLM agents, user-supplied text MUST be marked as untrusted input (e.g. <untrusted_data>)
         self.assertIn(
             "<untrusted_user_input>", raw_text,
             "Officer tool list_applications returned citizen-controlled prompt injection text directly without untrusted data delimiters"
@@ -126,7 +124,6 @@ class TestThreatHAgentLevel(unittest.TestCase):
         data = resp.get_json()
         raw_text = data.get("result", {}).get("content", [{}])[0].get("text", "")
 
-        # Clean up
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM applications WHERE id = %s", (app_id,))

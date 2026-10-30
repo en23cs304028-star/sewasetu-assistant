@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_d_login_otp.py: Threat D - Authentication, OTP & Session Security
+tests/security/sec_d_login_otp.py: Threat D - Authentication, OTP & Session Security
 Checks:
   - Unlimited OTP brute-force guesses without lockout (FAIL EXPECTED)
   - OTP reuse within 5-minute validity window (FAIL EXPECTED)
@@ -8,6 +8,8 @@ Checks:
   - Officer password brute-force without lockout / rate-limiting (FAIL EXPECTED)
   - Missing CSRF protection on login and consent forms (FAIL EXPECTED)
   - Session cookie flags (missing Secure flag) (FAIL EXPECTED)
+  - User enumeration by message in portal application submission (FAIL EXPECTED)
+  - User enumeration by timing in portal login (PASS)
 """
 
 import os
@@ -97,7 +99,6 @@ class TestThreatDLoginOTP(unittest.TestCase):
         # Second use with a new request -> must be rejected as already used
         rid2 = self._create_oauth_request(role="citizen", mobile=self.mobile)
         resp2 = self.app.post(f"/oauth/login?rid={rid2}", data={"otp": "654321"})
-        # Should NOT redirect to consent; must fail with invalid OTP
         self.assertNotEqual(
             resp2.status_code, 302,
             "OTP was reused successfully on a second login request within the validity window"
@@ -109,7 +110,6 @@ class TestThreatDLoginOTP(unittest.TestCase):
         self._insert_otp(self.mobile, "777888", age_seconds=310)
 
         resp = self.app.post(f"/oauth/login?rid={rid}", data={"otp": "777888"})
-        # Should stay on login page with flash message
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Invalid or expired OTP", resp.get_data(as_text=True))
 
@@ -139,9 +139,7 @@ class TestThreatDLoginOTP(unittest.TestCase):
         rid = self._create_oauth_request(role="citizen", mobile=self.mobile)
         self._insert_otp(self.mobile, "999111")
 
-        # Submit OTP without any CSRF token
         resp_login = self.app.post(f"/oauth/login?rid={rid}", data={"otp": "999111"})
-        # In systems with CSRF protection, this returns 400 Bad Request (Missing CSRF token)
         self.assertEqual(
             resp_login.status_code, 400,
             "Form accepted POST request without CSRF protection token"
@@ -151,11 +149,67 @@ class TestThreatDLoginOTP(unittest.TestCase):
         """[FAIL EXPECTED] Session cookies must enforce Secure, HttpOnly, and SameSite flags."""
         resp = self.app.get("/apply")
         cookie_header = resp.headers.get("Set-Cookie", "")
-        # Check for Secure flag
         self.assertIn(
             "Secure", cookie_header,
             "Session cookie lacks 'Secure' flag, allowing plaintext transmission over HTTP"
         )
+
+    def test_d7_user_enumeration_by_message(self):
+        """[FAIL EXPECTED] Differential messages must not leak whether a citizen has an existing application."""
+        registered_mobile = "9998887711"
+        conn = portal.get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO applications (application_no, applicant_name, mobile, dob, village, block, bank_account, ifsc, status, submitted_at)
+               VALUES ('SSP_ENUM_TEST', 'Enum Applicant', %s, '1950-01-01', 'Sonari', 'Sonari', '111122224444', 'SBIN0003077', 'PENDING', NOW())
+               RETURNING id""",
+            (registered_mobile,)
+        )
+        app_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Submit portal application for existing registered mobile
+        with self.app.session_transaction() as sess:
+            sess["verified_mobile"] = registered_mobile
+            sess["captcha_answer"] = 10
+            sess["form_data"] = {
+                "applicant_name": "Enum Applicant", "dob": "01/01/1950", "gender": "Female",
+                "marital_status": "Widowed", "husband_name": "", "village": "Sonari", "block": "Sonari",
+                "bank_account": "111122224444", "ifsc": "SBIN0003077"
+            }
+        resp = self.app.post("/declaration", data={"declaration": "on"}, follow_redirects=True)
+        html = resp.get_data(as_text=True)
+
+        # Clean up
+        conn = portal.get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM applications WHERE id = %s", (app_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Specific application number and status leak account existence
+        self.assertNotIn(
+            "already exists for this mobile number", html,
+            "Portal leaks application existence and status for registered mobile numbers via differential message"
+        )
+
+    def test_d8_user_enumeration_by_timing(self):
+        """Portal login timing should be consistent for existing vs non-existing users."""
+        # Non-existing user timing
+        t0 = time.time()
+        self.app.post("/status", data={"mobile": "0000000000", "password": "wrongpassword"})
+        t_non_existing = time.time() - t0
+
+        # Existing admin user timing (or portal user)
+        t0 = time.time()
+        self.app.post("/status", data={"mobile": "9998881234", "password": "wrongpassword"})
+        t_existing = time.time() - t0
+
+        # Timing difference should be small (< 0.5s) to prevent timing oracle
+        self.assertLess(abs(t_existing - t_non_existing), 0.5)
 
 
 if __name__ == "__main__":

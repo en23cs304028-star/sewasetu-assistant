@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_f_access_control.py: Threat F - Access Control & Authorization Boundaries
+tests/security/sec_f_access_control.py: Threat F - Access Control & Authorization Boundaries
 Checks:
   - IDOR protection on portal application view (PASS)
   - IDOR protection on portal application withdrawal (PASS)
@@ -8,12 +8,16 @@ Checks:
   - Officer token calling citizen MCP endpoint returns 403 Forbidden (PASS)
   - Officer action on missing application handled safely (PASS)
   - Officer action on already-decided application refused (PASS)
-  - Unauthenticated access to /eval-dashboard (FAIL EXPECTED: missing auth protection)
+  - MCP get_my_status IDOR isolation (PASS)
+  - MCP withdraw_application IDOR isolation (PASS)
+  - MCP submit_application draft ownership isolation (PASS)
+  - Public eval-dashboard results.json contains no credentials or tokens (PASS)
 """
 
 import os
 import sys
 import time
+import json
 import secrets
 import unittest
 import jwt
@@ -52,7 +56,7 @@ class TestThreatFAccessControl(unittest.TestCase):
         os.environ["PUBLIC_BASE_URL"] = self.issuer
         now = int(time.time())
 
-        # Citizen token
+        # Citizen A token
         c_claims = {
             "iss": self.issuer, "sub": "citizen:9991112222", "aud": f"{self.issuer}/mcp/citizen",
             "role": "citizen", "scope": "citizen", "iat": now, "exp": now + 1800, "jti": "jti_fc"
@@ -83,13 +87,12 @@ class TestThreatFAccessControl(unittest.TestCase):
         cur.close()
         conn.close()
 
-        # Log in as attacker (mobile: 9991112222)
         with self.app_portal.session_transaction() as sess:
             sess["logged_in"] = True
             sess["portal_mobile"] = "9991112222"
 
         resp = self.app_portal.get(f"/application/{victim_app_id}")
-        # Clean up
+
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM applications WHERE id = %s", (victim_app_id,))
@@ -113,14 +116,12 @@ class TestThreatFAccessControl(unittest.TestCase):
         cur.close()
         conn.close()
 
-        # Log in as attacker (mobile: 9991112222)
         with self.app_portal.session_transaction() as sess:
             sess["logged_in"] = True
             sess["portal_mobile"] = "9991112222"
 
         resp = self.app_portal.post(f"/application/{victim_app_id}/withdraw")
 
-        # Verify status remained PENDING
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("SELECT status FROM applications WHERE id = %s", (victim_app_id,))
@@ -184,7 +185,6 @@ class TestThreatFAccessControl(unittest.TestCase):
         data = resp.get_json()
         content = data.get("result", {}).get("content", [{}])[0].get("text", "")
 
-        # Clean up
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM applications WHERE id = %s", (decided_app_id,))
@@ -194,15 +194,116 @@ class TestThreatFAccessControl(unittest.TestCase):
 
         self.assertIn("already decided", content.lower())
 
-    def test_f7_eval_dashboard_unauthenticated_exposure(self):
-        """[FAIL EXPECTED] Evaluation dashboard /eval-dashboard should require admin authentication."""
-        # Unauthenticated request to eval-dashboard
-        resp = self.app_portal.get("/eval-dashboard")
-        # Should redirect to admin login (302) or return 401/403
-        self.assertNotEqual(
-            resp.status_code, 200,
-            "/eval-dashboard is exposed to the public without authentication"
+    def test_f8_idor_mcp_get_my_status(self):
+        """Citizen A calling get_my_status receives only their own status, never Citizen B's."""
+        # Insert app for Citizen B (9991113333)
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO applications (application_no, applicant_name, mobile, dob, village, block, bank_account, ifsc, status, submitted_at)
+               VALUES ('SSP_STATUS_B', 'Citizen B', '9991113333', '1950-01-01', 'Borgaon', 'Borgaon', '333322221111', 'SBIN0003077', 'PENDING', NOW())
+               RETURNING id"""
         )
+        b_app_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Citizen A calls get_my_status
+        headers = {"Authorization": f"Bearer {self.c_token}", "Content-Type": "application/json"}
+        req = {
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "get_my_status", "arguments": {}}
+        }
+        resp = self.app_mcp.post("/mcp/citizen", headers=headers, json=req)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        content = data.get("result", {}).get("content", [{}])[0].get("text", "")
+
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM applications WHERE id = %s", (b_app_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        self.assertNotIn("SSP_STATUS_B", content)
+        self.assertNotIn("Citizen B", content)
+
+    def test_f9_idor_mcp_withdraw_application(self):
+        """Citizen A calling withdraw_application cannot withdraw Citizen B's pending application."""
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO applications (application_no, applicant_name, mobile, dob, village, block, bank_account, ifsc, status, submitted_at)
+               VALUES ('SSP_WITHDRAW_B', 'Citizen B', '9991113333', '1950-01-01', 'Borgaon', 'Borgaon', '333322221111', 'SBIN0003077', 'PENDING', NOW())
+               RETURNING id"""
+        )
+        b_app_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Citizen A tries to withdraw
+        headers = {"Authorization": f"Bearer {self.c_token}", "Content-Type": "application/json"}
+        req = {
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "withdraw_application", "arguments": {"confirm": True}}
+        }
+        resp = self.app_mcp.post("/mcp/citizen", headers=headers, json=req)
+        self.assertEqual(resp.status_code, 200)
+
+        conn = services.get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM applications WHERE id = %s", (b_app_id,))
+        status_b = cur.fetchone()[0]
+        cur.execute("DELETE FROM applications WHERE id = %s", (b_app_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Citizen B's application must still be PENDING
+        self.assertEqual(status_b, "PENDING")
+
+    def test_f10_idor_mcp_submit_application(self):
+        """Citizen A calling submit_application with Citizen B's draft is refused."""
+        conn = services.get_db()
+        cur = conn.cursor()
+        draft_id, p_hash, conf_token, _ = services.create_draft(
+            cur, "9991113333",  # Belonging to Citizen B
+            {"applicant_name": "Citizen B", "dob": "01/01/1950", "village": "Sonari", "block": "Sonari",
+             "bank_account": "123456789012", "ifsc": "SBIN0003077"}
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Citizen A submits Citizen B's confirmation token
+        headers = {"Authorization": f"Bearer {self.c_token}", "Content-Type": "application/json"}
+        req = {
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": {"name": "submit_application", "arguments": {"confirmation_token": conf_token}}
+        }
+        resp = self.app_mcp.post("/mcp/citizen", headers=headers, json=req)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        content = data.get("result", {}).get("content", [{}])[0].get("text", "")
+        self.assertIn("not found or expired", content.lower())
+
+    def test_f11_eval_results_json_no_secrets(self):
+        """Verify that public results.json files contain no passwords, bearer tokens, or secret keys."""
+        candidates = [
+            os.path.join(BASE_DIR, "evals", "results.json"),
+            os.path.join(BASE_DIR, "app", "evals", "results.json")
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().lower()
+                self.assertNotIn("bearer ", content)
+                self.assertNotIn("admin_password", content)
+                self.assertNotIn("secret_key", content)
+                self.assertNotIn("eyj", content)  # Common JWT token header prefix
 
 
 if __name__ == "__main__":

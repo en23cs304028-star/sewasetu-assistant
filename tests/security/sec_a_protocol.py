@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_a_protocol.py: Threat A - Protocol Edge Cases & Robustness
+tests/security/sec_a_protocol.py: Threat A - Protocol Edge Cases & Robustness
 Checks:
-  - Invalid JSON body handling (expect JSON-RPC -32700 parse error, not HTTP 202 or 500)
-  - Wrong jsonrpc version handling (expect -32600 invalid request)
-  - Missing method handling (expect -32600 invalid request)
-  - Unknown method / unknown tool handling (-32601)
-  - Tool arguments with wrong types
-  - 5 MB large body handling
-  - Deeply nested JSON (1000-deep)
-  - JSON-RPC batch arrays (should not crash with 500)
-  - Duplicate message IDs
+  - Invalid JSON body handling (FAIL EXPECTED: returns 202 instead of -32700)
+  - Wrong jsonrpc version handling (FAIL EXPECTED: accepts 1.0)
+  - Missing method handling (FAIL EXPECTED: returns -32601 instead of -32600)
+  - Unknown method handling (PASS)
+  - Unknown tool handling (PASS)
+  - Tool arguments with wrong types (FAIL EXPECTED: leaks ValueError)
+  - JSON-RPC batch arrays (FAIL EXPECTED: 500 AttributeError)
+  - Deeply nested JSON (PASS)
+  - 5 MB body size limit (FAIL EXPECTED: processes 5MB instead of 413)
+  - prepare_application spam / rate limiting (FAIL EXPECTED: allows unlimited draft creation)
 """
 
 import os
@@ -24,6 +25,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
+
+os.environ.setdefault("PGHOST", "localhost")
+os.environ.setdefault("PGPORT", "5433")
+os.environ.setdefault("PGDATABASE", "sewasetu")
+os.environ.setdefault("PGUSER", "sewasetu")
+os.environ.setdefault("PGPASSWORD", "sewasetu123")
+os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
 
 import server
 import auth
@@ -105,7 +113,6 @@ class TestThreatAProtocol(unittest.TestCase):
 
     def test_a6_wrong_argument_types_should_not_leak_stack_trace(self):
         """[FAIL EXPECTED] Wrong argument types (e.g. app_id='abc') should return structured validation error, not Python ValueError."""
-        # Create officer token for get_application
         claims = {
             "iss": self.issuer,
             "sub": "officer:admin",
@@ -150,6 +157,34 @@ class TestThreatAProtocol(unittest.TestCase):
         large_body = b"{" + b'"padding":"' + (b"X" * (5 * 1024 * 1024)) + b'"}'
         resp = self.app.post("/mcp/citizen", headers=self.headers, data=large_body)
         self.assertEqual(resp.status_code, 413, f"Expected 413 Payload Too Large, got {resp.status_code}")
+
+    def test_a10_prepare_application_spam_rate_limit(self):
+        """[FAIL EXPECTED] Rapid repeated prepare_application calls must be rate-limited to prevent DB bloat."""
+        args = {
+            "applicant_name": "Spam Applicant",
+            "dob": "01/01/1950",
+            "gender": "Female",
+            "marital_status": "Widowed",
+            "village": "Sonari",
+            "block": "Sonari",
+            "bank_account": "123456789012",
+            "ifsc": "SBIN0003077"
+        }
+        statuses = []
+        for i in range(25):
+            payload = {
+                "jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
+                "params": {"name": "prepare_application", "arguments": args}
+            }
+            resp = self.app.post("/mcp/citizen", headers=self.headers, json=payload)
+            statuses.append(resp.status_code)
+
+        # In absence of rate limiting, all 25 succeed (200) without 429
+        # Security test expects rate limit (429) after excessive rapid prepare calls
+        self.assertIn(
+            429, statuses,
+            "prepare_application allows unlimited rapid spam without rate limiting, risking DB draft bloat"
+        )
 
 
 if __name__ == "__main__":

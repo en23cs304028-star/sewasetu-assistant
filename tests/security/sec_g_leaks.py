@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_g_leaks.py: Threat G - Sensitive Data Leaks & Information Disclosure
+tests/security/sec_g_leaks.py: Threat G - Sensitive Data Leaks & Information Disclosure
 Checks:
-  - /__gateway/ exposes all other numbers' OTPs when ?to= is omitted (FAIL EXPECTED)
-  - /__gateway/ console exposes live SMS traffic without auth (FAIL EXPECTED)
-  - Stack trace / Python ValueError leak in MCP tool errors (FAIL EXPECTED)
-  - Database schema error leak in tool responses (FAIL EXPECTED)
+  - /__gateway/ exposes all other numbers' OTPs when ?to= is omitted (FAIL EXPECTED: G-01)
+  - /__gateway/ console exposes live SMS traffic without auth (FAIL EXPECTED: G-02)
+  - Stack trace / Python ValueError leak in MCP tool errors (FAIL EXPECTED: G-03)
+  - Database schema error leak in tool responses (FAIL EXPECTED: G-04)
 """
 
 import os
@@ -19,7 +19,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
-sys.path.insert(0, os.path.join(BASE_DIR, "smsgw"))
 
 os.environ.setdefault("PGHOST", "localhost")
 os.environ.setdefault("PGPORT", "5433")
@@ -66,7 +65,6 @@ class TestThreatGLeaks(unittest.TestCase):
 
     def test_g1_gateway_exposes_all_otps_without_recipient_filter(self):
         """[FAIL EXPECTED] Calling SMS gateway /api/messages without ?to= must not dump entire inbox."""
-        # Seed messages for multiple numbers in simulated gateway
         now = time.time()
         smsgw_module.MESSAGES.clear()
         smsgw_module.MESSAGES.extend([
@@ -74,13 +72,11 @@ class TestThreatGLeaks(unittest.TestCase):
             {"id": 2, "to": "9990002222", "text": "Your OTP is 445566", "sent_at": now - 10, "delivery_at": now - 5},
         ])
 
-        # Query messages without 'to' parameter
         resp = self.app_gw.get("/api/messages")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         messages = data.get("messages", [])
 
-        # Should require ?to= parameter; returning all numbers' messages is an OTP leak
         self.assertEqual(
             len(messages), 0,
             "SMS gateway returned all global OTP messages when recipient 'to' parameter was omitted"
@@ -138,7 +134,6 @@ class TestThreatGLeaks(unittest.TestCase):
         conn.close()
 
         headers = {"Authorization": f"Bearer {self.o_token}", "Content-Type": "application/json"}
-        # Oversized note causes StringDataRightTruncation
         req = {
             "jsonrpc": "2.0", "id": 11, "method": "tools/call",
             "params": {"name": "approve_application", "arguments": {"app_id": app_id, "note": "Z" * 600}}

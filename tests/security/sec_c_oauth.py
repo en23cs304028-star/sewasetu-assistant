@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tests/security/test_c_oauth.py: Threat C - OAuth 2.1 Security & Grant Validation
+tests/security/sec_c_oauth.py: Threat C - OAuth 2.1 Security & Grant Validation
 Checks:
   - Wrong code_verifier rejected (PASS)
   - Authorization code reuse rejected (PASS)
@@ -9,8 +9,11 @@ Checks:
   - Redirect URI omission bypass in token exchange (FAIL EXPECTED: oauth.py skips check if omitted)
   - Plain PKCE method rejected (PASS)
   - Missing state parameter in authorization request (FAIL EXPECTED: state not mandated)
-  - Malicious redirect URI registration (javascript:, data:, non-loopback http) rejected (PASS)
-  - Refresh token reuse and revocation (FAIL EXPECTED: token family compromise revocation not performed)
+  - Dynamic client registration javascript: rejected (PASS)
+  - Dynamic client registration non-loopback http rejected (PASS)
+  - Refresh token reuse family revocation (FAIL EXPECTED: token compromise family revocation missing)
+  - Dynamic client registration flood abuse without rate limit (FAIL EXPECTED)
+  - Open redirect / path evasion attempts rejected (PASS)
 """
 
 import os
@@ -103,7 +106,6 @@ class TestThreatCOAuth(unittest.TestCase):
     def test_c2_auth_code_reuse_rejected(self):
         """Reusing the same authorization code twice must fail on the second attempt."""
         code = self._create_auth_code()
-        # First exchange - must succeed
         resp1 = self.app.post("/oauth/token", data={
             "grant_type": "authorization_code",
             "client_id": self.client_id,
@@ -113,7 +115,6 @@ class TestThreatCOAuth(unittest.TestCase):
         })
         self.assertEqual(resp1.status_code, 200)
 
-        # Second exchange with the same code - must be rejected
         resp2 = self.app.post("/oauth/token", data={
             "grant_type": "authorization_code",
             "client_id": self.client_id,
@@ -127,7 +128,6 @@ class TestThreatCOAuth(unittest.TestCase):
 
     def test_c3_expired_auth_code_rejected(self):
         """Authorization code older than 5 minutes (CODE_TTL) must be rejected."""
-        # Code created 301 seconds ago
         code = self._create_auth_code(ttl_offset=-305)
         resp = self.app.post("/oauth/token", data={
             "grant_type": "authorization_code",
@@ -159,16 +159,12 @@ class TestThreatCOAuth(unittest.TestCase):
     def test_c5_redirect_uri_omission_must_be_rejected(self):
         """[FAIL EXPECTED] Omitting redirect_uri in token request when code had redirect_uri must be rejected."""
         code = self._create_auth_code()
-        # Client deliberately omits redirect_uri parameter
         resp = self.app.post("/oauth/token", data={
             "grant_type": "authorization_code",
             "client_id": self.client_id,
             "code": code,
-            # redirect_uri omitted
             "code_verifier": self.verifier
         })
-        # RFC 6749 4.1.3 requires: if redirect_uri was in auth request, it MUST be included and match.
-        # Current oauth.py line 524 skips check if omitted: if f.get("redirect_uri") and f.get("redirect_uri") != c_redirect:
         self.assertEqual(
             resp.status_code, 400,
             "Server permitted token exchange when redirect_uri was omitted by client, bypassing mismatch checks"
@@ -184,7 +180,6 @@ class TestThreatCOAuth(unittest.TestCase):
             "code_challenge_method": "plain",
             "scope": "citizen"
         })
-        # Should redirect back with error=invalid_request or render 400
         if resp.status_code == 302:
             self.assertIn("invalid_request", resp.headers.get("Location", ""))
         else:
@@ -199,9 +194,7 @@ class TestThreatCOAuth(unittest.TestCase):
             "code_challenge": self.challenge,
             "code_challenge_method": "S256",
             "scope": "citizen"
-            # state intentionally omitted
         })
-        # Per OAuth 2.1 RFC 9700 Security Best Current Practice, state is required for CSRF mitigation
         if resp.status_code == 302:
             self.assertIn("error", resp.headers.get("Location", ""), "Missing state should be rejected")
         else:
@@ -229,7 +222,6 @@ class TestThreatCOAuth(unittest.TestCase):
 
     def test_c10_refresh_token_reuse_family_revocation(self):
         """[FAIL EXPECTED] Reusing an old refresh token must trigger compromise revocation of all issued tokens."""
-        # Issue initial tokens
         code = self._create_auth_code()
         resp1 = self.app.post("/oauth/token", data={
             "grant_type": "authorization_code",
@@ -241,7 +233,6 @@ class TestThreatCOAuth(unittest.TestCase):
         data1 = resp1.get_json()
         rt1 = data1["refresh_token"]
 
-        # First refresh -> rotates to rt2
         resp2 = self.app.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -251,7 +242,6 @@ class TestThreatCOAuth(unittest.TestCase):
         data2 = resp2.get_json()
         rt2 = data2["refresh_token"]
 
-        # Attacker / replay presents old rt1 again
         resp_reuse = self.app.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -259,8 +249,6 @@ class TestThreatCOAuth(unittest.TestCase):
         })
         self.assertEqual(resp_reuse.status_code, 400)
 
-        # Under OAuth 2.1 Section 4.3.3, detecting reuse of rt1 MUST revoke the whole family, including rt2!
-        # Test if rt2 is still active or revoked:
         resp_check = self.app.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -270,6 +258,45 @@ class TestThreatCOAuth(unittest.TestCase):
             resp_check.status_code, 400,
             "Compromise detection missing: reusing rotated refresh token rt1 did not revoke legitimate active token rt2"
         )
+
+    def test_c11_register_unlimited_clients_abuse(self):
+        """[FAIL EXPECTED] /oauth/register must rate limit dynamic client creation to prevent DB exhaustion."""
+        statuses = []
+        for i in range(25):
+            resp = self.app.post("/oauth/register", json={
+                "client_name": f"Spam Client {i}",
+                "redirect_uris": ["http://localhost:9000/cb"]
+            })
+            statuses.append(resp.status_code)
+
+        # In absence of rate limiting, all 25 succeed with 201 Created
+        self.assertIn(
+            429, statuses,
+            "/oauth/register allows unlimited dynamic client creation without rate limiting, allowing DB exhaustion"
+        )
+
+    def test_c12_open_redirect_evasion_rejected(self):
+        """Open redirect attempts in authorization redirect_uri must be rejected."""
+        malicious_uris = [
+            "http://localhost:8080.evil.com/callback",
+            "http://localhost:8080@evil.com/callback",
+            "http://localhost:8080/callback/../../evil",
+            "//evil.com",
+            "https://evil.com"
+        ]
+        for bad_uri in malicious_uris:
+            resp = self.app.get("/oauth/authorize", query_string={
+                "client_id": self.client_id,
+                "redirect_uri": bad_uri,
+                "response_type": "code",
+                "code_challenge": self.challenge,
+                "code_challenge_method": "S256",
+                "scope": "citizen"
+            })
+            self.assertEqual(
+                resp.status_code, 400,
+                f"Open redirect evasion attempt with URI '{bad_uri}' was not rejected with 400"
+            )
 
 
 if __name__ == "__main__":
