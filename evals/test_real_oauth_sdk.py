@@ -3,9 +3,10 @@
 evals/test_real_oauth_sdk.py: Verification script for real OAuth 2.1 Code + PKCE
 and official Python MCP SDK client against local or remote Sewa Setu servers.
 
-Accepts BASE_URL from command line argument (sys.argv[1]) or environment variable
-BASE_URL / PUBLIC_BASE_URL, defaulting to http://localhost:8000.
-Reads ADMIN_PASSWORD from environment variable, never hardcoding credentials.
+Configuration & Precedence:
+- BASE_URL: sys.argv[1] > os.environ["BASE_URL"] > os.environ["PUBLIC_BASE_URL"] > http://localhost:8000
+- ADMIN_PASSWORD: Environment variable os.environ["ADMIN_PASSWORD"] takes strict precedence
+  over any local .env file. Passwords are never hardcoded in source.
 """
 
 import os
