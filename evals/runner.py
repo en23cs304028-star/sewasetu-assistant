@@ -107,7 +107,26 @@ def run_evals():
             # 2. Submit
             tok = prep.get("confirmation_token", "")
             transcript.append({"speaker": "citizen", "text": "Yes, all details are correct. I agree to the declaration."})
-            mock_cur.fetchone.side_effect = [None, (1001,), (0,)]  # active check -> none, create -> id 1001, portal_user -> count 0
+
+            # Reconstruct saved draft row from mock_cur call arguments for Postgres draft table lock
+            draft_insert_args = None
+            for call in mock_cur.execute.call_args_list:
+                sql, args = call[0]
+                if "INSERT INTO drafts" in sql:
+                    draft_insert_args = args
+                    break
+
+            if draft_insert_args:
+                d_id, c_id, payload_json, p_hash, s_ver, c_at, exp_at = draft_insert_args
+                draft_row = (d_id, c_id, payload_json, p_hash, s_ver, "prepared", exp_at, None)
+                mock_cur.fetchone.side_effect = [
+                    draft_row,  # 1. SELECT from drafts FOR UPDATE
+                    None,       # 2. active check -> None
+                    (1001,),    # 3. create application -> id 1001
+                    (0,)        # 4. portal_user count -> 0
+                ]
+            else:
+                mock_cur.fetchone.side_effect = [None, (1001,), (0,)]
 
             with patch.object(services, "get_db", return_value=mock_conn), \
                  patch.object(services, "send_sms"):
