@@ -133,8 +133,8 @@ class TestThreatEInjection(unittest.TestCase):
         conn.close()
 
         # Must be escaped as &lt;script&gt; and NOT raw <script>
-        self.assertNotIn("<script>alert('XSS')</script>", html)
-        self.assertIn("&lt;script&gt;alert('XSS')&lt;/script&gt;", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
 
     def test_e4_embedded_null_byte_handling(self):
         """[FAIL EXPECTED] Embedded null bytes in input strings cause unhandled ValueError from psycopg2."""
