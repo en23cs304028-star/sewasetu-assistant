@@ -11,6 +11,7 @@ import os
 import io
 import re
 import random
+import secrets
 import hashlib
 import configparser
 from datetime import datetime, date, timedelta
@@ -38,11 +39,55 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or config.get("app", "secret_key")
 # Two hours: elderly applicants fill the form slowly; the draft lives in the session.
 app.config["PERMANENT_SESSION_LIFETIME"] = 7200
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("PUBLIC_BASE_URL", "").strip().startswith("https://")
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
-if not ADMIN_PASSWORD:
+is_production = os.environ.get("ENV", "").lower() == "production" or os.environ.get("FLASK_ENV", "").lower() == "production"
+DEFAULT_PASSWORDS = {"admin", "password", "sewasetu", "sewasetu123", "default", "changeme", "12345678", "admin123", "secret", "root"}
+
+if is_production:
+    if not ADMIN_PASSWORD or ADMIN_PASSWORD.lower() in DEFAULT_PASSWORDS or len(ADMIN_PASSWORD) < 16:
+        raise RuntimeError("In production, ADMIN_PASSWORD must be set, not a default password, and at least 16 characters long.")
+elif not ADMIN_PASSWORD:
     raise RuntimeError("ADMIN_PASSWORD environment variable must be set. The application will not start without it.")
+
+def get_csrf_token():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+    return session["csrf_token"]
+
+@app.context_processor
+def inject_csrf_token():
+    return dict(csrf_token=get_csrf_token)
+
+CSRF_EXEMPT_PATHS = {
+    "/oauth/token",
+    "/oauth/register",
+    "/oauth/revoke",
+}
+
+@app.before_request
+def csrf_protect():
+    app.config["SESSION_COOKIE_SECURE"] = os.environ.get("PUBLIC_BASE_URL", "").strip().startswith("https://")
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        path = request.path
+        if path in CSRF_EXEMPT_PATHS or path.startswith("/__gateway/") or path.startswith("/mcp/"):
+            return
+        if request.is_json or request.headers.get("Authorization", "").startswith("Bearer "):
+            return
+        submitted = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+        sess_token = session.get("csrf_token")
+        if not submitted or not sess_token or not secrets.compare_digest(submitted, sess_token):
+            abort(400, description="CSRF token missing or invalid.")
+
+def get_client_ip(req):
+    xff = req.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return req.remote_addr or "127.0.0.1"
 
 # An applicant may hold at most one application in these states at a time.
 # WITHDRAWN and REJECTED applications do not block a fresh application.
@@ -178,14 +223,18 @@ def apply():
         if len(mobile) != 10 or not mobile.isdigit():
             flash("Please enter a valid 10-digit mobile number.")
             return render_template("apply.html", captcha_q=make_captcha())
-        code = str(random.randint(100000, 999999))
+        code = "%06d" % secrets.randbelow(1000000)
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("INSERT INTO otps (mobile, code, created_at) VALUES (%s, %s, %s)",
-                    (mobile, code, datetime.now()))
-        conn.commit()
+        cur.execute("SELECT created_at FROM otps WHERE mobile = %s ORDER BY id DESC LIMIT 1", (mobile,))
+        last_otp = cur.fetchone()
+        in_cooldown = bool(last_otp and (datetime.now() - last_otp[0]).total_seconds() < 60)
+        if not in_cooldown:
+            cur.execute("INSERT INTO otps (mobile, code, created_at, attempts, used_at) VALUES (%s, %s, %s, 0, NULL)",
+                        (mobile, code, datetime.now()))
+            conn.commit()
+            send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
         cur.close(); conn.close()
-        send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
         session.permanent = True
         session["apply_mobile"] = mobile
         return redirect(url_for("verify"))
@@ -205,21 +254,41 @@ def verify():
         return redirect(url_for("apply"))
     if request.method == "POST":
         code = request.form.get("otp", "").strip()
+        ip = get_client_ip(request)
         conn = get_db()
+        allowed, retry_after = services.check_rate_limit(conn, f"otp_verify_ip:{ip}", 10, 300)
+        if not allowed:
+            conn.close()
+            resp = render_template("verify.html", mobile=mobile, error="Too many failed attempts. Please try again later.")
+            return resp, 429, {"Retry-After": str(max(1, retry_after))}
+
         cur = conn.cursor()
-        cur.execute("SELECT code, created_at FROM otps WHERE mobile = %s "
+        cur.execute("SELECT id, code, created_at, attempts, used_at FROM otps WHERE mobile = %s "
                     "ORDER BY id DESC LIMIT 1", (mobile,))
         row = cur.fetchone()
-        cur.close(); conn.close()
-        if row and row[0] == code:
-            age = (datetime.now() - row[1]).total_seconds()
-            if age > OTP_VALIDITY_SECONDS:
-                app.logger.warning("otp expired mobile=%s age=%ds" % (mobile, int(age)))
-                flash("OTP expired. Please request a new OTP.")
-                return redirect(url_for("apply"))
+        if not row:
+            cur.close(); conn.close()
+            flash("Invalid OTP.")
+            return render_template("verify.html", mobile=mobile)
+        otp_id, db_code, created_at, attempts, used_at = row
+        age = (datetime.now() - created_at).total_seconds()
+        if used_at is not None or attempts >= 5 or age > OTP_VALIDITY_SECONDS:
+            cur.close(); conn.close()
+            app.logger.warning("otp expired or invalidated mobile=%s age=%ds" % (mobile, int(age)))
+            flash("OTP expired or invalidated. Please request a new OTP.")
+            return redirect(url_for("apply"))
+
+        if secrets.compare_digest(db_code, code):
+            cur.execute("UPDATE otps SET used_at = %s WHERE id = %s", (datetime.now(), otp_id))
+            conn.commit()
+            cur.close(); conn.close()
             session["verified_mobile"] = mobile
             return redirect(url_for("form_step", step=1))
-        flash("Invalid OTP.")
+        else:
+            cur.execute("UPDATE otps SET attempts = attempts + 1 WHERE id = %s", (otp_id,))
+            conn.commit()
+            cur.close(); conn.close()
+            flash("Invalid OTP.")
     return render_template("verify.html", mobile=mobile)
 
 
@@ -491,13 +560,38 @@ def reset_password():
 @app.route("/admin", methods=["GET", "POST"])
 def admin_login():
     if request.method == "POST":
-        if (ADMIN_PASSWORD and request.form.get("username") == ADMIN_USERNAME and
-                request.form.get("password") == ADMIN_PASSWORD):
+        ip = get_client_ip(request)
+        username = (request.form.get("username") or "").strip()
+        pwd = request.form.get("password") or ""
+        conn = get_db()
+
+        ip_key = f"officer_fail_ip:{ip}"
+        user_key = f"officer_fail_user:{username.lower()}"
+
+        ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
+        user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
+        if ip_limited or user_limited:
+            conn.close()
+            retry_after = max(ip_retry, user_retry)
+            resp = render_template("admin_login.html", error="Too many failed login attempts. Please try again later.")
+            return resp, 429, {"Retry-After": str(max(1, retry_after))}
+
+        valid_user = secrets.compare_digest(username, ADMIN_USERNAME)
+        valid_pwd = bool(ADMIN_PASSWORD and secrets.compare_digest(pwd, ADMIN_PASSWORD))
+
+        if valid_user and valid_pwd:
+            services.clear_rate_limit(conn, ip_key)
+            services.clear_rate_limit(conn, user_key)
+            conn.close()
             session["logged_in"] = True
             session["admin"] = True
             session["admin_user"] = ADMIN_USERNAME
             return redirect(url_for("admin_dashboard"))
-        flash("Invalid credentials.")
+        else:
+            services.record_rate_limit_failure(conn, ip_key, 900)
+            services.record_rate_limit_failure(conn, user_key, 900)
+            conn.close()
+            flash("Invalid credentials.")
     return render_template("admin_login.html")
 
 

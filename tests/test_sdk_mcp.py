@@ -46,7 +46,7 @@ class TestOfficialSDKMCP(unittest.TestCase):
         cls.port = 8898
         cls.base_url = f"http://127.0.0.1:{cls.port}"
         cls.server_thread = threading.Thread(
-            target=lambda: server.app.run(host="127.0.0.1", port=cls.port, debug=False, use_reloader=False),
+            target=lambda: server.app.run(host="127.0.0.1", port=cls.port, debug=False, use_reloader=False, load_dotenv=False),
             daemon=True
         )
         cls.server_thread.start()

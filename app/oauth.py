@@ -528,6 +528,13 @@ def authorize():
     return redirect(url_for("oauth.login", rid=rid))
 
 
+def _get_client_ip():
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "127.0.0.1"
+
+
 @oauth.route("/oauth/login", methods=["GET", "POST"])
 def login():
     rid = request.args.get("rid", "")
@@ -537,42 +544,100 @@ def login():
                                detail="Please start again from your application."), 400
     role = req["role"]
     if request.method == "POST":
+        ip = _get_client_ip()
+        conn = portal.get_db()
         if role == "citizen":
             if request.form.get("otp"):
                 mobile = req["pending_mobile"] or ""
                 code = request.form.get("otp", "").strip()
-                conn = portal.get_db()
+
+                allowed, retry_after = services.check_rate_limit(conn, f"otp_verify_ip:{ip}", 10, 300)
+                if not allowed:
+                    conn.close()
+                    resp = render_template("oauth_login.html", rid=rid, role=role,
+                                           client_name=req["params"]["client_name"],
+                                           pending_mobile=req["pending_mobile"],
+                                           error="Too many failed attempts. Please try again later.")
+                    return resp, 429, {"Retry-After": str(max(1, retry_after))}
+
                 cur = conn.cursor()
-                cur.execute("SELECT code, created_at FROM otps WHERE mobile = %s ORDER BY id DESC LIMIT 1",
-                            (mobile,))
+                cur.execute(
+                    "SELECT id, code, created_at, attempts, used_at FROM otps WHERE mobile = %s ORDER BY id DESC LIMIT 1",
+                    (mobile,)
+                )
                 row = cur.fetchone()
-                cur.close(); conn.close()
-                if row and secrets.compare_digest(row[0], code) and \
-                        (datetime.now() - row[1]).total_seconds() <= portal.OTP_VALIDITY_SECONDS:
-                    _update_request(rid, subject="citizen:" + mobile)
-                    return redirect(url_for("oauth.consent", rid=rid))
-                flash("Invalid or expired OTP.")
+                if not row:
+                    cur.close(); conn.close()
+                    flash("Invalid or expired OTP.")
+                else:
+                    otp_id, db_code, created_at, attempts, used_at = row
+                    age = (datetime.now() - created_at).total_seconds()
+                    if used_at is not None or attempts >= 5 or age > portal.OTP_VALIDITY_SECONDS:
+                        cur.close(); conn.close()
+                        flash("Invalid or expired OTP.")
+                    elif secrets.compare_digest(db_code, code):
+                        cur.execute("UPDATE otps SET used_at = %s WHERE id = %s", (datetime.now(), otp_id))
+                        conn.commit()
+                        cur.close(); conn.close()
+                        _update_request(rid, subject="citizen:" + mobile)
+                        return redirect(url_for("oauth.consent", rid=rid))
+                    else:
+                        cur.execute("UPDATE otps SET attempts = attempts + 1 WHERE id = %s", (otp_id,))
+                        conn.commit()
+                        cur.close(); conn.close()
+                        flash("Invalid or expired OTP.")
             else:
                 mobile = request.form.get("mobile", "").strip()
                 if len(mobile) != 10 or not mobile.isdigit():
+                    conn.close()
                     flash("Please enter a valid 10-digit mobile number.")
                 else:
-                    code = "%06d" % secrets.randbelow(1000000)
-                    conn = portal.get_db()
                     cur = conn.cursor()
-                    cur.execute("INSERT INTO otps (mobile, code, created_at) VALUES (%s, %s, %s)",
-                                (mobile, code, datetime.now()))
-                    conn.commit()
+                    cur.execute("SELECT created_at FROM otps WHERE mobile = %s ORDER BY id DESC LIMIT 1", (mobile,))
+                    last_otp = cur.fetchone()
+                    in_cooldown = bool(last_otp and (datetime.now() - last_otp[0]).total_seconds() < 60)
+                    if not in_cooldown:
+                        code = "%06d" % secrets.randbelow(1000000)
+                        cur.execute(
+                            "INSERT INTO otps (mobile, code, created_at, attempts, used_at) VALUES (%s, %s, %s, 0, NULL)",
+                            (mobile, code, datetime.now())
+                        )
+                        conn.commit()
+                        portal.send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
                     cur.close(); conn.close()
-                    portal.send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
                     _update_request(rid, pending_mobile=mobile)
                     req["pending_mobile"] = mobile
         else:
-            if (portal.ADMIN_PASSWORD and request.form.get("username") == portal.ADMIN_USERNAME and
-                    request.form.get("password") == portal.ADMIN_PASSWORD):
+            username = (request.form.get("username") or "").strip()
+            password = request.form.get("password") or ""
+            ip_key = f"officer_fail_ip:{ip}"
+            user_key = f"officer_fail_user:{username.lower()}"
+
+            ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
+            user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
+            if ip_limited or user_limited:
+                conn.close()
+                retry_after = max(ip_retry, user_retry)
+                resp = render_template("oauth_login.html", rid=rid, role=role,
+                                       client_name=req["params"]["client_name"],
+                                       pending_mobile=req["pending_mobile"],
+                                       error="Too many failed login attempts. Please try again later.")
+                return resp, 429, {"Retry-After": str(max(1, retry_after))}
+
+            valid_user = secrets.compare_digest(username, portal.ADMIN_USERNAME)
+            valid_pwd = bool(portal.ADMIN_PASSWORD and secrets.compare_digest(password, portal.ADMIN_PASSWORD))
+
+            if valid_user and valid_pwd:
+                services.clear_rate_limit(conn, ip_key)
+                services.clear_rate_limit(conn, user_key)
+                conn.close()
                 _update_request(rid, subject="officer:" + portal.ADMIN_USERNAME)
                 return redirect(url_for("oauth.consent", rid=rid))
-            flash("Invalid credentials.")
+            else:
+                services.record_rate_limit_failure(conn, ip_key, 900)
+                services.record_rate_limit_failure(conn, user_key, 900)
+                conn.close()
+                flash("Invalid credentials.")
     return render_template("oauth_login.html", rid=rid, role=role,
                            client_name=req["params"]["client_name"],
                            pending_mobile=req["pending_mobile"])
@@ -649,6 +714,15 @@ def _issue(subject, role, scope, audience, client_id, session_ends=None, client_
 
 @oauth.post("/oauth/token")
 def token():
+    ip = _get_client_ip()
+    conn = portal.get_db()
+    ok, retry_after = services.check_rate_limit(conn, f"token_ip:{ip}", max_attempts=120, window_seconds=60)
+    conn.close()
+    if not ok:
+        resp = jsonify({"error": "slow_down", "error_description": "Too many requests to token endpoint."})
+        resp.headers["Retry-After"] = str(max(1, retry_after))
+        return resp, 429
+
     f = request.form
     grant = f.get("grant_type")
     client_id = f.get("client_id", "")

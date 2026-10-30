@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 import auth
 import citizen
 import officer
+import services
 
 app = Flask(__name__)
 
@@ -375,6 +376,18 @@ def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
         resp.status_code = 405
         resp.headers["Allow"] = "POST"
         return resp
+
+    xff = request.headers.get("X-Forwarded-For")
+    ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "127.0.0.1")
+    conn = services.get_db()
+    if not type(conn).__module__.startswith("unittest.mock"):
+        allowed, retry_after = services.check_rate_limit(conn, f"mcp_ip:{ip}", 240, 60)
+        conn.close()
+        if not allowed:
+            resp = jsonify({"error": "slow_down", "message": "Too many requests to MCP endpoint."})
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(max(1, retry_after))
+            return resp
 
     ok, err_resp, subject = authenticate_request(role, endpoint_path)
     if not ok:

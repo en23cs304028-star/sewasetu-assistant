@@ -233,10 +233,17 @@ def perform_headless_oauth(role="citizen", mobile=None, username=None, password=
     if not rid:
         raise RuntimeError("Failed to obtain OAuth request id (rid)")
 
+    def _extract_csrf(html_text):
+        m = re.search(r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']', html_text)
+        return m.group(1) if m else ""
+
     # 4. Login step
+    login_page = sess.get(f"{base_portal}/oauth/login?rid={rid}", timeout=5)
+    csrf = _extract_csrf(login_page.text)
+
     if role == "citizen":
         # Submit mobile
-        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"mobile": mobile}, timeout=5)
+        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"mobile": mobile, "csrf_token": csrf}, timeout=5)
         # Fetch OTP from SMS gateway inbox
         otp_code = None
         for _ in range(10):
@@ -256,13 +263,15 @@ def perform_headless_oauth(role="citizen", mobile=None, username=None, password=
             raise RuntimeError(f"Could not retrieve OTP from SMS gateway for mobile {mobile}")
 
         # Submit OTP
-        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"otp": otp_code}, allow_redirects=False, timeout=5)
+        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"otp": otp_code, "csrf_token": csrf}, allow_redirects=False, timeout=5)
     else:
         # Officer login
-        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"username": username, "password": password}, allow_redirects=False, timeout=5)
+        sess.post(f"{base_portal}/oauth/login?rid={rid}", data={"username": username, "password": password, "csrf_token": csrf}, allow_redirects=False, timeout=5)
 
     # 5. Approve Consent
-    consent_resp = sess.post(f"{base_portal}/oauth/consent?rid={rid}", data={"decision": "allow"}, allow_redirects=False, timeout=5)
+    consent_page = sess.get(f"{base_portal}/oauth/consent?rid={rid}", timeout=5)
+    csrf_c = _extract_csrf(consent_page.text) or csrf
+    consent_resp = sess.post(f"{base_portal}/oauth/consent?rid={rid}", data={"decision": "allow", "csrf_token": csrf_c}, allow_redirects=False, timeout=5)
     cb_loc = consent_resp.headers.get("Location", "")
     code = parse_qs(urlparse(cb_loc).query).get("code", [""])[0]
     if not code:

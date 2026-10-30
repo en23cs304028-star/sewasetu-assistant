@@ -299,6 +299,22 @@ def ensure_security_tables(conn):
             first_attempt  TIMESTAMP DEFAULT NOW(),
             last_attempt   TIMESTAMP DEFAULT NOW()
         );
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'otps' AND column_name = 'attempts'
+            ) THEN
+                ALTER TABLE otps ADD COLUMN attempts INT DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'otps' AND column_name = 'used_at'
+            ) THEN
+                ALTER TABLE otps ADD COLUMN used_at TIMESTAMP;
+            END IF;
+        END $$;
     """)
     conn.commit()
     cur.close()
@@ -316,12 +332,14 @@ def check_rate_limit(conn, key, max_attempts, window_seconds):
     if not row:
         cur.execute("INSERT INTO rate_limits (key, count, first_attempt, last_attempt) VALUES (%s, 1, %s, %s)",
                     (key, now, now))
+        conn.commit()
         cur.close()
         return True, 0
     count, first_attempt = row
     if (now - first_attempt).total_seconds() > window_seconds:
         cur.execute("UPDATE rate_limits SET count = 1, first_attempt = %s, last_attempt = %s WHERE key = %s",
                     (now, now, key))
+        conn.commit()
         cur.close()
         return True, 0
     if count >= max_attempts:
@@ -329,8 +347,67 @@ def check_rate_limit(conn, key, max_attempts, window_seconds):
         cur.close()
         return False, max(1, retry_after)
     cur.execute("UPDATE rate_limits SET count = count + 1, last_attempt = %s WHERE key = %s", (now, key))
+    conn.commit()
     cur.close()
     return True, 0
+
+
+def is_rate_limited(conn, key, max_attempts, window_seconds):
+    """
+    Checks if a key has reached max_attempts within window_seconds without incrementing.
+    Returns (limited: bool, retry_after: int)
+    """
+    cur = conn.cursor()
+    now = datetime.now()
+    cur.execute("SELECT count, first_attempt FROM rate_limits WHERE key = %s", (key,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return False, 0
+    count, first_attempt = row
+    elapsed = (now - first_attempt).total_seconds()
+    if elapsed > window_seconds:
+        return False, 0
+    if count >= max_attempts:
+        retry_after = max(1, int(window_seconds - elapsed))
+        return True, retry_after
+    return False, 0
+
+
+def record_rate_limit_failure(conn, key, window_seconds):
+    """
+    Increments failure count for a key. Returns new count.
+    """
+    cur = conn.cursor()
+    now = datetime.now()
+    cur.execute("SELECT count, first_attempt FROM rate_limits WHERE key = %s", (key,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute("INSERT INTO rate_limits (key, count, first_attempt, last_attempt) VALUES (%s, 1, %s, %s)",
+                    (key, now, now))
+        conn.commit()
+        cur.close()
+        return 1
+    count, first_attempt = row
+    if (now - first_attempt).total_seconds() > window_seconds:
+        cur.execute("UPDATE rate_limits SET count = 1, first_attempt = %s, last_attempt = %s WHERE key = %s",
+                    (now, now, key))
+        conn.commit()
+        cur.close()
+        return 1
+    new_count = count + 1
+    cur.execute("UPDATE rate_limits SET count = %s, last_attempt = %s WHERE key = %s", (new_count, now, key))
+    conn.commit()
+    cur.close()
+    return new_count
+
+
+def clear_rate_limit(conn, key):
+    """Resets rate limiting counter for a given key on successful authentication."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rate_limits WHERE key = %s", (key,))
+    conn.commit()
+    cur.close()
 
 
 def ensure_drafts_table(conn):

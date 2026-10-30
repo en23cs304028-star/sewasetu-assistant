@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS otps (
     id         SERIAL PRIMARY KEY,
     mobile     VARCHAR(15),
     code       VARCHAR(6),
-    created_at TIMESTAMP
+    created_at TIMESTAMP,
+    attempts   INT DEFAULT 0,
+    used_at    TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_mobile ON applications(mobile);
