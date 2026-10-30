@@ -277,7 +277,7 @@ def withdraw_application(cur, app_id, mobile, actor=None):
 # ---------------------------------------------------------------------------
 
 def ensure_security_tables(conn):
-    """Idempotently ensures security, revocation, and lockout tables exist."""
+    """Idempotently ensures security, revocation, lockout, and rate limiting tables exist."""
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS oauth_revocations (
@@ -292,9 +292,45 @@ def ensure_security_tables(conn):
             subject    VARCHAR(80) PRIMARY KEY,
             revoked_at TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            key            VARCHAR(128) PRIMARY KEY,
+            count          INT DEFAULT 1,
+            first_attempt  TIMESTAMP DEFAULT NOW(),
+            last_attempt   TIMESTAMP DEFAULT NOW()
+        );
     """)
     conn.commit()
     cur.close()
+
+
+def check_rate_limit(conn, key, max_attempts, window_seconds):
+    """
+    PostgreSQL-backed atomic sliding-window rate limiter.
+    Returns (allowed: bool, retry_after_seconds: int)
+    """
+    cur = conn.cursor()
+    now = datetime.now()
+    cur.execute("SELECT count, first_attempt FROM rate_limits WHERE key = %s", (key,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute("INSERT INTO rate_limits (key, count, first_attempt, last_attempt) VALUES (%s, 1, %s, %s)",
+                    (key, now, now))
+        cur.close()
+        return True, 0
+    count, first_attempt = row
+    if (now - first_attempt).total_seconds() > window_seconds:
+        cur.execute("UPDATE rate_limits SET count = 1, first_attempt = %s, last_attempt = %s WHERE key = %s",
+                    (now, now, key))
+        cur.close()
+        return True, 0
+    if count >= max_attempts:
+        retry_after = int(window_seconds - (now - first_attempt).total_seconds())
+        cur.close()
+        return False, max(1, retry_after)
+    cur.execute("UPDATE rate_limits SET count = count + 1, last_attempt = %s WHERE key = %s", (now, key))
+    cur.close()
+    return True, 0
 
 
 def ensure_drafts_table(conn):

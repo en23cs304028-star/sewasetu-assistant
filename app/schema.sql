@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS oauth_session_revocations (
     revoked_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS rate_limits (
+    key           VARCHAR(128) PRIMARY KEY,
+    count         INT DEFAULT 1,
+    first_attempt TIMESTAMP DEFAULT NOW(),
+    last_attempt  TIMESTAMP DEFAULT NOW()
+);
+
 -- Durable citizen draft applications (multi-process safe, canonical hash bound)
 CREATE TABLE IF NOT EXISTS drafts (
     draft_id        VARCHAR(64) PRIMARY KEY,

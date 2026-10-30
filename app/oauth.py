@@ -40,6 +40,7 @@ from flask import (Blueprint, request, jsonify, redirect, render_template, sessi
                    flash, url_for, abort)
 
 import app as portal
+import services
 
 oauth = Blueprint("oauth", __name__)
 
@@ -50,7 +51,7 @@ SESSION = {
     "citizen": {"access": 15 * 60, "session": 2 * 3600},   # 2-hour session, access token 15 min max
     "officer": {"access": 15 * 60, "session": 8 * 3600},   # one working day, access token 15 min max
 }
-CODE_TTL = 300                    # 5 minutes
+CODE_TTL = 60                     # 60 seconds (OAuth 2.1 authorization code lifetime)
 SCOPES = {
     "citizen": "act for you on the Old Age Pension portal: check eligibility, apply, "
                "see and manage your own application",
@@ -211,21 +212,43 @@ LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
 
 
 def redirect_allowed(registered, uri):
-    """Exact match, except for loopback redirects (RFC 8252 s7.3): native clients listen
-    on an ephemeral port, so a registered http://localhost/callback matches any port."""
-    if uri in registered:
-        return True
+    """
+    Validates redirect URI against registered client URIs.
+    Parses with urllib.parse. Rejects userinfo (@) and fragments (#).
+    Exact string match against registered URIs, with RFC 8252 s7.3 loopback port exemption
+    only for localhost, 127.0.0.1, and [::1].
+    """
+    if not uri or not isinstance(uri, str):
+        return False
+    if "#" in uri or "@" in uri:
+        return False
     try:
         u = urlparse(uri)
-    except ValueError:
+        if u.username or u.password or u.fragment:
+            return False
+        port = u.port
+    except (ValueError, Exception):
         return False
+
+    # Exact string match
+    if uri in registered:
+        return True
+
+    # Loopback port variation exemption (RFC 8252 Section 7.3)
     if u.scheme != "http" or u.hostname not in LOOPBACK_HOSTS:
         return False
+
     for r in registered:
-        rp = urlparse(r)
-        if rp.scheme == "http" and rp.hostname in LOOPBACK_HOSTS and rp.path == u.path \
-                and rp.query == u.query and rp.hostname == u.hostname:
-            return True
+        try:
+            rp = urlparse(r)
+            if (rp.scheme == "http" and
+                rp.hostname in LOOPBACK_HOSTS and
+                rp.path == u.path and
+                rp.query == u.query and
+                rp.hostname == u.hostname):
+                return True
+        except Exception:
+            continue
     return False
 
 
@@ -269,24 +292,80 @@ def load_client(client_id):
 
 @oauth.post("/oauth/register")
 def register():
+    ip = request.remote_addr or "unknown"
+    conn = portal.get_db()
+
+    # Per-IP rate limit: max 10 dynamic client registrations per hour
+    ok, retry_after = services.check_rate_limit(conn, f"dcr_ip:{ip}", max_attempts=10, window_seconds=3600)
+    if not ok:
+        conn.commit()
+        conn.close()
+        resp = jsonify({
+            "error": "rate_limit_exceeded",
+            "error_description": "Registration rate limit exceeded. Try again later."
+        })
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+
+    # Global cap: max 500 DCR clients; expire unused clients older than 30 days
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM oauth_clients WHERE kind = 'dcr'")
+    total_dcr = cur.fetchone()[0]
+    if total_dcr >= 500:
+        cur.execute("DELETE FROM oauth_clients WHERE kind = 'dcr' AND created_at < %s",
+                    (datetime.now() - timedelta(days=30),))
+        conn.commit()
+        cur.execute("SELECT COUNT(*) FROM oauth_clients WHERE kind = 'dcr'")
+        if cur.fetchone()[0] >= 500:
+            cur.close(); conn.close()
+            resp = jsonify({
+                "error": "rate_limit_exceeded",
+                "error_description": "Global client registration limit reached."
+            })
+            resp.status_code = 429
+            return resp
+
     body = request.get_json(silent=True) or {}
     uris = body.get("redirect_uris")
     if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
+        cur.close(); conn.close()
         return jsonify({"error": "invalid_redirect_uri",
                         "error_description": "redirect_uris must be a non-empty list"}), 400
     for u in uris:
-        p = urlparse(u)
-        if p.scheme not in ("https", "http") or (p.scheme == "http" and p.hostname not in ("localhost", "127.0.0.1")):
+        if "#" in u or "@" in u:
+            cur.close(); conn.close()
+            return jsonify({"error": "invalid_redirect_uri",
+                            "error_description": "fragments and userinfo are forbidden in redirect URIs"}), 400
+        try:
+            p = urlparse(u)
+            if p.fragment or p.username or p.password:
+                cur.close(); conn.close()
+                return jsonify({"error": "invalid_redirect_uri",
+                                "error_description": "fragments and userinfo are forbidden in redirect URIs"}), 400
+            _ = p.port
+        except (ValueError, Exception):
+            cur.close(); conn.close()
+            return jsonify({"error": "invalid_redirect_uri",
+                            "error_description": "malformed redirect URI"}), 400
+
+        if p.scheme not in ("https", "http"):
+            cur.close(); conn.close()
             return jsonify({"error": "invalid_redirect_uri",
                             "error_description": "redirect URIs must be https, or http on localhost"}), 400
+
+        if p.scheme == "http" and p.hostname not in LOOPBACK_HOSTS:
+            cur.close(); conn.close()
+            return jsonify({"error": "invalid_redirect_uri",
+                            "error_description": "http redirect URIs are only permitted on loopback (localhost, 127.0.0.1, [::1])"}), 400
+
     method = body.get("token_endpoint_auth_method", "none")
     if method not in ("none", "client_secret_post"):
+        cur.close(); conn.close()
         return jsonify({"error": "invalid_client_metadata",
                         "error_description": "token_endpoint_auth_method must be none or client_secret_post"}), 400
     client_id = "ssc_" + secrets.token_urlsafe(16)
     secret = secrets.token_urlsafe(32) if method == "client_secret_post" else None
-    conn = portal.get_db()
-    cur = conn.cursor()
     cur.execute("INSERT INTO oauth_clients (client_id, client_name, redirect_uris, secret_hash, kind, "
                 "created_at, fetched_at) VALUES (%s, %s, %s, %s, 'dcr', %s, %s)",
                 (client_id, (body.get("client_name") or "Unnamed application")[:100], json.dumps(uris),
@@ -523,8 +602,9 @@ def token():
         c_client, c_redirect, c_scope, c_challenge, c_resource, subject, role, created = row
         if c_client != client_id:
             return _token_error("invalid_grant", "code was issued to a different client")
-        if f.get("redirect_uri") and f.get("redirect_uri") != c_redirect:
-            return _token_error("invalid_grant", "redirect_uri mismatch")
+        if c_redirect:
+            if not f.get("redirect_uri") or f.get("redirect_uri") != c_redirect:
+                return _token_error("invalid_grant", "redirect_uri mismatch: required and must match authorization request")
         if (datetime.now() - created).total_seconds() > CODE_TTL:
             return _token_error("invalid_grant", "code expired")
         if not verifier or _b64url(hashlib.sha256(verifier.encode()).digest()) != c_challenge:
@@ -535,12 +615,34 @@ def token():
 
     if grant == "refresh_token":
         rt = f.get("refresh_token", "")
+        tok_hash = hashlib.sha256(rt.encode()).hexdigest()
         conn = portal.get_db()
         cur = conn.cursor()
+        now = datetime.now()
+
+        # Check if this refresh token was already revoked / rotated (compromise detection)
+        cur.execute("SELECT client_id, subject FROM oauth_refresh_tokens WHERE token_hash = %s AND revoked_at IS NOT NULL",
+                    (tok_hash,))
+        revoked_row = cur.fetchone()
+        if revoked_row:
+            # Replay of rotated refresh token detected: revoke entire token family
+            bad_client_id, bad_subject = revoked_row
+            cur.execute("UPDATE oauth_refresh_tokens SET revoked_at = %s WHERE client_id = %s AND subject = %s AND revoked_at IS NULL",
+                        (now, bad_client_id, bad_subject))
+            cur.execute("""
+                INSERT INTO oauth_session_revocations (subject, revoked_at)
+                VALUES (%s, %s)
+                ON CONFLICT (subject) DO UPDATE SET revoked_at = EXCLUDED.revoked_at
+            """, (bad_subject, now))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return _token_error("invalid_grant", "refresh token reuse detected; all sessions revoked", 400)
+
         cur.execute("UPDATE oauth_refresh_tokens SET revoked_at = %s WHERE token_hash = %s AND "
                     "revoked_at IS NULL AND expires_at > %s RETURNING client_id, subject, role, "
                     "scope, resource, expires_at, client_name",
-                    (datetime.now(), hashlib.sha256(rt.encode()).hexdigest(), datetime.now()))
+                    (now, tok_hash, now))
         row = cur.fetchone()
         conn.commit()
         cur.close(); conn.close()
