@@ -111,6 +111,19 @@ CREATE TABLE IF NOT EXISTS oauth_program_tokens (     -- admin-issued, long-live
     revoked_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS oauth_revocations (
+    jti        VARCHAR(64) PRIMARY KEY,
+    subject    VARCHAR(80),
+    revoked_at TIMESTAMP DEFAULT NOW(),
+    expires_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_revocations_subject ON oauth_revocations (subject);
+
+CREATE TABLE IF NOT EXISTS oauth_session_revocations (
+    subject    VARCHAR(80) PRIMARY KEY,
+    revoked_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Durable citizen draft applications (multi-process safe, canonical hash bound)
 CREATE TABLE IF NOT EXISTS drafts (
     draft_id        VARCHAR(64) PRIMARY KEY,

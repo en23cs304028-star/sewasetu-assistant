@@ -54,7 +54,7 @@ class TestThreatEInjection(unittest.TestCase):
         # Officer token
         o_claims = {
             "iss": self.issuer, "sub": "officer:admin", "aud": f"{self.issuer}/mcp/officer",
-            "role": "officer", "iat": now, "exp": now + 1800, "jti": "jti_o"
+            "role": "officer", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_o"
         }
         self.o_token = jwt.encode(o_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_inj_kid"})
 

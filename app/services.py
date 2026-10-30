@@ -276,8 +276,30 @@ def withdraw_application(cur, app_id, mobile, actor=None):
 # Durable Draft State & Cryptographic Hash Binding
 # ---------------------------------------------------------------------------
 
+def ensure_security_tables(conn):
+    """Idempotently ensures security, revocation, and lockout tables exist."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_revocations (
+            jti        VARCHAR(64) PRIMARY KEY,
+            subject    VARCHAR(80),
+            revoked_at TIMESTAMP DEFAULT NOW(),
+            expires_at TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_revocations_subject ON oauth_revocations (subject);
+
+        CREATE TABLE IF NOT EXISTS oauth_session_revocations (
+            subject    VARCHAR(80) PRIMARY KEY,
+            revoked_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+    conn.commit()
+    cur.close()
+
+
 def ensure_drafts_table(conn):
     """Idempotently ensures the drafts table, indexes, and active application index exist."""
+    ensure_security_tables(conn)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS drafts (

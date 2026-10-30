@@ -13,7 +13,7 @@ import sys
 import json
 import threading
 from urllib.parse import urlparse
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response, jsonify, g
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
@@ -194,6 +194,7 @@ def authenticate_request(role, endpoint_path):
         resp.headers["WWW-Authenticate"] = 'Bearer error="%s", error_description="%s", resource_metadata="%s"' % (error_code, result, metadata_url)
         return False, resp, None
 
+    g.oauth_claims = result
     sub = result.get("sub", "")
     return True, None, sub
 
@@ -253,7 +254,8 @@ def handle_citizen_tool_call(tool_name, arguments, subject):
             confirm=arguments.get("confirm", False)
         )
     elif tool_name == "sign_out":
-        return citizen.sign_out(mobile)
+        jti = getattr(g, "oauth_claims", {}).get("jti") if hasattr(g, "oauth_claims") else None
+        return citizen.sign_out(mobile, jti=jti)
     else:
         return {"error": "Unknown tool: %s" % tool_name}
 

@@ -69,6 +69,7 @@ class TestRealHTTPMCP(unittest.TestCase):
             "role": role,
             "scope": role,
             "iat": now,
+            "nbf": now,
             "exp": now + 1800,
             "jti": f"http_tok_{int(time.time())}"
         }

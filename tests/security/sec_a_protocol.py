@@ -58,6 +58,7 @@ class TestThreatAProtocol(unittest.TestCase):
             "role": "citizen",
             "scope": "citizen",
             "iat": now,
+            "nbf": now,
             "exp": now + 1800,
             "jti": "jti_proto_sec"
         }
@@ -120,7 +121,9 @@ class TestThreatAProtocol(unittest.TestCase):
             "role": "officer",
             "scope": "officer",
             "iat": int(time.time()),
-            "exp": int(time.time()) + 1800
+            "nbf": int(time.time()),
+            "exp": int(time.time()) + 1800,
+            "jti": "jti_proto_o"
         }
         o_tok = jwt.encode(claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_test_kid"})
         payload = {

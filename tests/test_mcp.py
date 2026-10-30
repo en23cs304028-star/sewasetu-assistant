@@ -58,6 +58,7 @@ class TestMCPServers(unittest.TestCase):
             "role": role,
             "scope": role,
             "iat": now,
+            "nbf": now,
             "exp": now + exp_offset,
             "jti": "tok123"
         }

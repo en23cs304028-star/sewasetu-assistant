@@ -65,6 +65,7 @@ class TestOfficialSDKMCP(unittest.TestCase):
             "role": role,
             "scope": role,
             "iat": now,
+            "nbf": now,
             "exp": now + 1800,
             "jti": f"sdk_tok_{int(time.time())}"
         }

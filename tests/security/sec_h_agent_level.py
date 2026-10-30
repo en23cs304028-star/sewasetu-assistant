@@ -49,7 +49,7 @@ class TestThreatHAgentLevel(unittest.TestCase):
         # Officer token
         o_claims = {
             "iss": self.issuer, "sub": "officer:admin", "aud": f"{self.issuer}/mcp/officer",
-            "role": "officer", "scope": "officer", "iat": now, "exp": now + 1800, "jti": "jti_h"
+            "role": "officer", "scope": "officer", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_h"
         }
         self.o_token = jwt.encode(o_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_h_kid"})
         self.headers = {"Authorization": f"Bearer {self.o_token}", "Content-Type": "application/json"}

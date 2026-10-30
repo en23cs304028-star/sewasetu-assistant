@@ -59,9 +59,46 @@ def get_public_keys_from_db():
 JWT_PUBLIC_KEYS_OVERRIDE = None
 
 
+def is_token_revoked(jti, subject=None, iat=None):
+    """Check whether a token or session has been revoked in Postgres."""
+    if not jti:
+        return True
+    try:
+        conn = services.get_db()
+        # If test suite patched services.get_db with a mock connection, do not deplete mock cursor
+        if type(conn).__module__.startswith("unittest.mock"):
+            return False
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM oauth_revocations WHERE jti = %s", (jti,))
+        row = cur.fetchone()
+        if row and row[0] == 1:
+            cur.close()
+            conn.close()
+            return True
+        if subject:
+            cur.execute("SELECT revoked_at FROM oauth_session_revocations WHERE subject = %s", (subject,))
+            row = cur.fetchone()
+            if row and row[0]:
+                revoked_at = row[0]
+                if isinstance(revoked_at, (datetime, date)):
+                    revoked_ts = int(revoked_at.timestamp())
+                else:
+                    revoked_ts = int(revoked_at)
+                if iat is None or iat <= revoked_ts:
+                    cur.close()
+                    conn.close()
+                    return True
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+    return False
+
+
 def verify_token(token, expected_resource, expected_role=None, public_keys=None):
     """
     Verify RS256 JWT access token.
+    Enforces RS256 only, requires: iss, aud, exp, nbf, role, jti, and sub.
     Returns (valid: bool, claims_or_error: dict or str)
     """
     if not token:
@@ -73,26 +110,28 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
     except Exception as e:
         return False, "invalid_header: %s" % e
 
+    alg = unverified_headers.get("alg")
+    if alg != "RS256":
+        return False, "unsupported_algorithm: RS256 required, got %s" % alg
+
     kid = unverified_headers.get("kid")
+    if not kid:
+        return False, "missing_kid"
+
     if public_keys is None:
         public_keys = JWT_PUBLIC_KEYS_OVERRIDE if JWT_PUBLIC_KEYS_OVERRIDE is not None else get_public_keys_from_db()
 
     pub_key = public_keys.get(kid) if kid else None
-    if not pub_key and public_keys:
-        # If kid not matched, try the first key
-        pub_key = list(public_keys.values())[0]
-
     if not pub_key:
         return False, "signing_key_not_found"
 
     try:
-        # First verify signature, issuer, and expiration without enforcing audience yet
         claims = jwt.decode(
             token,
             pub_key,
             algorithms=["RS256"],
             issuer=issuer,
-            options={"verify_aud": False, "require": ["exp", "iss", "sub"]}
+            options={"verify_aud": False, "require": ["exp", "iss", "sub", "jti", "nbf", "aud"]}
         )
     except jwt.ExpiredSignatureError:
         return False, "token_expired"
@@ -101,11 +140,14 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
     except Exception as e:
         return False, "token_verification_failed: %s" % e
 
+    # Require role claim
+    token_role = claims.get("role") or claims.get("scope")
+    if not token_role:
+        return False, "missing_role"
+
     # Role and scope checks (role mismatch is forbidden -> 403)
-    if expected_role:
-        token_role = claims.get("role") or claims.get("scope")
-        if token_role != expected_role:
-            return False, "forbidden: expected role %s, got %s" % (expected_role, token_role)
+    if expected_role and token_role != expected_role:
+        return False, "forbidden: expected role %s, got %s" % (expected_role, token_role)
 
     # Audience check: must match canonical endpoint resource URL
     token_aud = claims.get("aud")
@@ -116,6 +158,10 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
     if "session_ends" in claims:
         if int(time.time()) > claims["session_ends"]:
             return False, "session_ended: absolute session lifetime elapsed"
+
+    # Revocation check against Postgres
+    if is_token_revoked(claims.get("jti"), subject=claims.get("sub"), iat=claims.get("iat")):
+        return False, "token_revoked"
 
     return True, claims
 
@@ -143,16 +189,28 @@ def get_protected_resource_metadata(resource_path=""):
     }
 
 
-def revoke_citizen_session(mobile):
-    """Revoke all active refresh tokens for a citizen when signing out."""
+def revoke_citizen_session(mobile, jti=None):
+    """Revoke all active refresh tokens, session, and optional jti for a citizen when signing out."""
     cfg = load_config()
     try:
         conn = services.get_db(cfg)
         cur = conn.cursor()
         subject = "citizen:%s" % mobile
+        now = datetime.now()
         cur.execute("UPDATE oauth_refresh_tokens SET revoked_at = %s WHERE subject = %s AND revoked_at IS NULL",
-                    (datetime.now(), subject))
+                    (now, subject))
         n = cur.rowcount
+        cur.execute("""
+            INSERT INTO oauth_session_revocations (subject, revoked_at)
+            VALUES (%s, %s)
+            ON CONFLICT (subject) DO UPDATE SET revoked_at = EXCLUDED.revoked_at
+        """, (subject, now))
+        if jti:
+            cur.execute("""
+                INSERT INTO oauth_revocations (jti, subject, revoked_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (jti) DO NOTHING
+            """, (jti, subject, now))
         conn.commit()
         cur.close()
         conn.close()

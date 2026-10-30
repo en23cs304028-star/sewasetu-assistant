@@ -56,7 +56,7 @@ class TestThreatGLeaks(unittest.TestCase):
         # Officer token
         o_claims = {
             "iss": self.issuer, "sub": "officer:admin", "aud": f"{self.issuer}/mcp/officer",
-            "role": "officer", "scope": "officer", "iat": now, "exp": now + 1800, "jti": "jti_go"
+            "role": "officer", "scope": "officer", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_go"
         }
         self.o_token = jwt.encode(o_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_g_kid"})
 
@@ -196,7 +196,7 @@ class TestThreatGLeaks(unittest.TestCase):
         now = int(time.time())
         c_claims = {
             "iss": self.issuer, "sub": f"citizen:{test_mobile}", "aud": f"{self.issuer}/mcp/citizen",
-            "role": "citizen", "scope": "citizen", "iat": now, "exp": now + 1800, "jti": "jti_log"
+            "role": "citizen", "scope": "citizen", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_log"
         }
         c_tok = jwt.encode(c_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_g_kid"})
         self.app_mcp.post("/mcp/citizen", headers={"Authorization": f"Bearer {c_tok}"}, json=req_c)

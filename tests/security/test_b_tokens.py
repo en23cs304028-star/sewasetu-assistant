@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import json
+import secrets
 import unittest
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -39,12 +40,14 @@ os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
 import server
 import auth
 import services
+import app as portal_app
 
 
 class TestThreatBTokens(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.portal_client = portal_app.app.test_client()
         cls.priv_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cls.pub_key = cls.priv_key.public_key()
         cls.keys_dict = {"trusted_kid_1": cls.pub_key}
@@ -67,7 +70,10 @@ class TestThreatBTokens(unittest.TestCase):
         h = {"kid": kid}
         if headers:
             h.update(headers)
-        return jwt.encode(claims, k, algorithm=algorithm, headers=h)
+        c = dict(claims)
+        if "nbf" not in c and not c.pop("_omit_nbf", False):
+            c["nbf"] = c.get("iat", int(time.time()))
+        return jwt.encode(c, k, algorithm=algorithm, headers=h)
 
     def test_b1_expired_token_rejected(self):
         """Expired JWT access token must be rejected with 401."""
@@ -113,6 +119,7 @@ class TestThreatBTokens(unittest.TestCase):
             "aud": f"{self.issuer}/mcp/citizen",
             "role": "citizen",
             "iat": now,
+            "nbf": now,
             "exp": now + 1800,
             "jti": "b3_alg_none"
         }
@@ -130,6 +137,7 @@ class TestThreatBTokens(unittest.TestCase):
             "aud": f"{self.issuer}/mcp/citizen",
             "role": "citizen",
             "iat": now,
+            "nbf": now,
             "exp": now + 1800,
             "jti": "b4_hs256"
         }
@@ -214,7 +222,7 @@ class TestThreatBTokens(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
 
     def test_b9_missing_jti_claim_rejected(self):
-        """[FAIL EXPECTED] Token missing jti claim should be rejected to enforce replay tracking."""
+        """Token missing jti claim should be rejected to enforce replay tracking."""
         now = int(time.time())
         claims = {
             "iss": self.issuer,
@@ -233,7 +241,7 @@ class TestThreatBTokens(unittest.TestCase):
         )
 
     def test_b10_kid_not_in_jwks_rejected(self):
-        """[FAIL EXPECTED] Token specifying kid='unknown_bogus_kid' must be rejected, not fall back to key 0."""
+        """Token specifying kid='unknown_bogus_kid' must be rejected, not fall back to key 0."""
         now = int(time.time())
         claims = {
             "iss": self.issuer,
@@ -253,16 +261,17 @@ class TestThreatBTokens(unittest.TestCase):
         )
 
     def test_b11_token_still_working_after_sign_out(self):
-        """[FAIL EXPECTED] Access token must not continue working after sign_out tool is called."""
+        """Access token must not continue working after sign_out tool is called."""
         now = int(time.time())
+        mobile = f"9990{secrets.randbelow(1000000):06d}"
         claims = {
             "iss": self.issuer,
-            "sub": "citizen:9990001001",
+            "sub": f"citizen:{mobile}",
             "aud": f"{self.issuer}/mcp/citizen",
             "role": "citizen",
             "iat": now,
             "exp": now + 1800,
-            "jti": "b11_sign_out_test"
+            "jti": f"b11_sign_out_{mobile}"
         }
         token = self._mint_token(claims)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -283,8 +292,54 @@ class TestThreatBTokens(unittest.TestCase):
             "Access token is still valid after sign_out because tokens are completely stateless"
         )
 
+    def test_b13_token_revocation_via_oauth_revoke(self):
+        """Access token revoked via /oauth/revoke endpoint must immediately fail auth."""
+        now = int(time.time())
+        mobile = f"9990{secrets.randbelow(1000000):06d}"
+        claims = {
+            "iss": self.issuer,
+            "sub": f"citizen:{mobile}",
+            "aud": f"{self.issuer}/mcp/citizen",
+            "role": "citizen",
+            "iat": now,
+            "exp": now + 1800,
+            "jti": f"b13_{secrets.token_hex(8)}"
+        }
+        token = self._mint_token(claims)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        # Ensure token works before revoke
+        resp = self.app.post("/mcp/citizen", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        self.assertEqual(resp.status_code, 200)
+
+        # Call /oauth/revoke with the access token
+        revoke_resp = self.portal_client.post("/oauth/revoke", data={"token": token, "token_type_hint": "access_token"})
+        self.assertEqual(revoke_resp.status_code, 200)
+
+        # Subsequent call with the same access token must be rejected
+        resp2 = self.app.post("/mcp/citizen", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        self.assertEqual(resp2.status_code, 401)
+
+    def test_b14_missing_nbf_claim_rejected(self):
+        """Token missing nbf claim must be rejected."""
+        now = int(time.time())
+        claims = {
+            "iss": self.issuer,
+            "sub": "citizen:9990001014",
+            "aud": f"{self.issuer}/mcp/citizen",
+            "role": "citizen",
+            "iat": now,
+            "exp": now + 1800,
+            "jti": "b14_no_nbf",
+            "_omit_nbf": True
+        }
+        token = self._mint_token(claims)
+        resp = self.app.post("/mcp/citizen", headers={"Authorization": f"Bearer {token}"},
+                             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        self.assertEqual(resp.status_code, 401)
+
     def test_b12_one_citizen_token_used_for_another_citizen_data(self):
-        """A citizen token for mobile 9990001001 cannot submit data belonging to 9990001002."""
+        """A citizen token for mobile 9990001012 cannot submit data belonging to 9990001002."""
         conn = services.get_db()
         cur = conn.cursor()
         draft_id, p_hash, conf_token, _ = services.create_draft(
@@ -299,7 +354,7 @@ class TestThreatBTokens(unittest.TestCase):
         now = int(time.time())
         claims = {
             "iss": self.issuer,
-            "sub": "citizen:9990001001",
+            "sub": "citizen:9990001012",
             "aud": f"{self.issuer}/mcp/citizen",
             "role": "citizen",
             "iat": now,

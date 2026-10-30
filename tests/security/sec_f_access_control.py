@@ -59,14 +59,14 @@ class TestThreatFAccessControl(unittest.TestCase):
         # Citizen A token
         c_claims = {
             "iss": self.issuer, "sub": "citizen:9991112222", "aud": f"{self.issuer}/mcp/citizen",
-            "role": "citizen", "scope": "citizen", "iat": now, "exp": now + 1800, "jti": "jti_fc"
+            "role": "citizen", "scope": "citizen", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_fc"
         }
         self.c_token = jwt.encode(c_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_f_kid"})
 
         # Officer token
         o_claims = {
             "iss": self.issuer, "sub": "officer:admin", "aud": f"{self.issuer}/mcp/officer",
-            "role": "officer", "scope": "officer", "iat": now, "exp": now + 1800, "jti": "jti_fo"
+            "role": "officer", "scope": "officer", "iat": now, "nbf": now, "exp": now + 1800, "jti": "jti_fo"
         }
         self.o_token = jwt.encode(o_claims, self.priv_key, algorithm="RS256", headers={"kid": "sec_f_kid"})
 

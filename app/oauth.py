@@ -47,8 +47,8 @@ ISSUER = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 # Sign-ins are short and absolute: a session ends at a fixed time counted from the
 # consent, however often it is refreshed. Portals are used on shared phones and kiosks.
 SESSION = {
-    "citizen": {"access": 20 * 60, "session": 2 * 3600},   # 2-hour session, like the form's draft
-    "officer": {"access": 30 * 60, "session": 8 * 3600},   # one working day
+    "citizen": {"access": 15 * 60, "session": 2 * 3600},   # 2-hour session, access token 15 min max
+    "officer": {"access": 15 * 60, "session": 8 * 3600},   # one working day, access token 15 min max
 }
 CODE_TTL = 300                    # 5 minutes
 SCOPES = {
@@ -108,12 +108,14 @@ def mint_access_token(subject, role, scope, audience, client_id, ttl=None, kind=
     now = int(time.time())
     if ttl is None:
         ttl = SESSION[role]["access"]
+    if kind != "program":
+        ttl = min(ttl, 15 * 60)
     exp = now + ttl
     if session_ends:
         exp = min(exp, int(session_ends.timestamp()))
     claims = {
         "iss": ISSUER, "sub": subject, "aud": audience, "scope": scope, "role": role,
-        "client_id": client_id, "iat": now, "exp": exp, "jti": secrets.token_hex(12),
+        "client_id": client_id, "iat": now, "nbf": now, "exp": exp, "jti": secrets.token_hex(16),
         "kind": kind,
     }
     if session_ends:
@@ -557,14 +559,48 @@ def token():
 
 @oauth.post("/oauth/revoke")
 def revoke():
-    """RFC 7009: a client signs the person out by revoking its refresh token. Access
-    tokens are short-lived JWTs and simply expire."""
+    """RFC 7009: revoke access token (by jti) or refresh token (and session)."""
     f = request.form
-    tok = f.get("token", "")
+    tok = f.get("token", "").strip()
+    if not tok:
+        return ("", 200)
+
     conn = portal.get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE oauth_refresh_tokens SET revoked_at = %s WHERE token_hash = %s AND revoked_at IS NULL",
-                (datetime.now(), hashlib.sha256(tok.encode()).hexdigest()))
+    now = datetime.now()
+
+    # 1. Check if token is a JWT access token
+    try:
+        unverified = jwt.decode(tok, options={"verify_signature": False})
+        jti = unverified.get("jti")
+        sub = unverified.get("sub")
+        exp = unverified.get("exp")
+        if jti:
+            cur.execute("""
+                INSERT INTO oauth_revocations (jti, subject, revoked_at, expires_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (jti) DO NOTHING
+            """, (jti, sub, now, datetime.fromtimestamp(exp) if exp else None))
+    except Exception:
+        pass
+
+    # 2. Check if token is a refresh token
+    tok_hash = hashlib.sha256(tok.encode()).hexdigest()
+    cur.execute("""
+        UPDATE oauth_refresh_tokens
+        SET revoked_at = %s
+        WHERE token_hash = %s AND revoked_at IS NULL
+        RETURNING subject
+    """, (now, tok_hash))
+    row = cur.fetchone()
+    if row:
+        subj = row[0]
+        cur.execute("""
+            INSERT INTO oauth_session_revocations (subject, revoked_at)
+            VALUES (%s, %s)
+            ON CONFLICT (subject) DO UPDATE SET revoked_at = EXCLUDED.revoked_at
+        """, (subj, now))
+
     conn.commit()
     cur.close(); conn.close()
     return ("", 200)

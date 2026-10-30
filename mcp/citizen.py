@@ -308,9 +308,9 @@ def withdraw_application(mobile, confirm=False):
     }
 
 
-def sign_out(mobile):
+def sign_out(mobile, jti=None):
     """Ends the citizen session and revokes tokens for shared-device and kiosk safety."""
-    revoked = revoke_citizen_session(mobile)
+    revoked = revoke_citizen_session(mobile, jti=jti)
     try:
         conn = services.get_db()
         cur = conn.cursor()
