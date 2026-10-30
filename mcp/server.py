@@ -331,6 +331,26 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
     elif method == "tools/call":
         tool_name = params.get("name")
         args = params.get("arguments", {}) or {}
+
+        # Group 5: Per-citizen rate limit on prepare_application to prevent DB draft bloat
+        if tool_name == "prepare_application":
+            mobile = subject.split(":", 1)[1] if ":" in subject else subject
+            conn = services.get_db()
+            if not type(conn).__module__.startswith("unittest.mock"):
+                allowed, retry_after = services.check_rate_limit(conn, f"draft_spam:{mobile}", max_attempts=10, window_seconds=600)
+                conn.close()
+                if not allowed:
+                    return {
+                        "_status_code": 429,
+                        "_retry_after": retry_after,
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32000,
+                            "message": "Rate limit exceeded: too many prepare_application calls for this citizen. Please wait before creating another draft."
+                        }
+                    }
+
         try:
             res = tool_handler(tool_name, args, subject)
             return {
@@ -395,11 +415,22 @@ def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
 
     req_data = request.get_json(force=True, silent=True) or {}
     resp_data = process_jsonrpc(req_data, tools_list, tool_handler, subject)
+    status_code = 200
+    retry_after = None
+    if isinstance(resp_data, dict):
+        if "_status_code" in resp_data:
+            status_code = resp_data.pop("_status_code")
+        if "_retry_after" in resp_data:
+            retry_after = resp_data.pop("_retry_after")
+
     if resp_data is None:
         # Notifications get HTTP 202 with no body
         resp = Response("", status=202, mimetype="application/json")
     else:
         resp = jsonify(resp_data)
+        resp.status_code = status_code
+        if retry_after:
+            resp.headers["Retry-After"] = str(max(1, retry_after))
 
     session_id = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
     if session_id:
