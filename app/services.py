@@ -300,6 +300,18 @@ def ensure_security_tables(conn):
             last_attempt   TIMESTAMP DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS security_audit_log (
+            id         SERIAL PRIMARY KEY,
+            event_type VARCHAR(64) NOT NULL,
+            subject    VARCHAR(128),
+            ip         VARCHAR(64),
+            user_agent TEXT,
+            details    JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_sec_audit_event ON security_audit_log (event_type);
+        CREATE INDEX IF NOT EXISTS idx_sec_audit_created ON security_audit_log (created_at);
+
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -406,6 +418,31 @@ def clear_rate_limit(conn, key):
     """Resets rate limiting counter for a given key on successful authentication."""
     cur = conn.cursor()
     cur.execute("DELETE FROM rate_limits WHERE key = %s", (key,))
+    conn.commit()
+    cur.close()
+
+
+def log_security_event(conn, event_type, subject=None, ip=None, user_agent=None, details=None):
+    """
+    Records security events in security_audit_log.
+    Strips passwords, OTP codes, raw tokens, and sensitive secrets before persisting.
+    """
+    if details and isinstance(details, dict):
+        safe_details = {}
+        sensitive_keys = {"password", "otp", "code", "token", "raw_token", "secret", "client_secret", "private_pem"}
+        for k, v in details.items():
+            if any(s in str(k).lower() for s in sensitive_keys):
+                safe_details[k] = "[REDACTED]"
+            else:
+                safe_details[k] = v
+    else:
+        safe_details = details or {}
+
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO security_audit_log (event_type, subject, ip, user_agent, details, created_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+    """, (event_type, subject, ip, user_agent, json.dumps(safe_details) if safe_details else None))
     conn.commit()
     cur.close()
 

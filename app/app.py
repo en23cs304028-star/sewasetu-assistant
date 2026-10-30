@@ -81,6 +81,13 @@ def csrf_protect():
         submitted = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
         sess_token = session.get("csrf_token")
         if not submitted or not sess_token or not secrets.compare_digest(submitted, sess_token):
+            try:
+                conn_log = get_db()
+                services.log_security_event(conn_log, "csrf_failure", ip=get_client_ip(request),
+                                            user_agent=request.user_agent.string, details={"path": request.path})
+                conn_log.close()
+            except Exception:
+                pass
             abort(400, description="CSRF token missing or invalid.")
 
 def get_client_ip(req):
@@ -571,6 +578,9 @@ def admin_login():
         ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
         user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
         if ip_limited or user_limited:
+            services.log_security_event(conn, "lockout", subject=f"officer:{username}", ip=ip,
+                                        user_agent=request.user_agent.string,
+                                        details={"reason": "officer_lockout_exceeded"})
             conn.close()
             retry_after = max(ip_retry, user_retry)
             resp = render_template("admin_login.html", error="Too many failed login attempts. Please try again later.")
@@ -590,6 +600,9 @@ def admin_login():
         else:
             services.record_rate_limit_failure(conn, ip_key, 900)
             services.record_rate_limit_failure(conn, user_key, 900)
+            services.log_security_event(conn, "login_failure", subject=f"officer:{username}", ip=ip,
+                                        user_agent=request.user_agent.string,
+                                        details={"reason": "invalid_credentials"})
             conn.close()
             flash("Invalid credentials.")
     return render_template("admin_login.html")

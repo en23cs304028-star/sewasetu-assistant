@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_app ON audit_log(application_id);
 CREATE INDEX IF NOT EXISTS idx_app_status_submitted ON applications(status, submitted_at);
 
+-- Security events log: auth failures, lockouts, token rejections/revocations, client registrations.
+CREATE TABLE IF NOT EXISTS security_audit_log (
+    id         SERIAL PRIMARY KEY,
+    event_type VARCHAR(64) NOT NULL,
+    subject    VARCHAR(128),
+    ip         VARCHAR(64),
+    user_agent TEXT,
+    details    JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sec_audit_event ON security_audit_log (event_type);
+CREATE INDEX IF NOT EXISTS idx_sec_audit_created ON security_audit_log (created_at);
+
 -- OAuth 2.1 authorization server (third-party applications acting for a citizen or officer)
 CREATE TABLE IF NOT EXISTS oauth_keys (
     kid         VARCHAR(32) PRIMARY KEY,

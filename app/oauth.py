@@ -444,6 +444,9 @@ def register():
                  hashlib.sha256(secret.encode()).hexdigest() if secret else None,
                  datetime.now(), datetime.now()))
     conn.commit()
+    services.log_security_event(conn, "client_registered", subject=client_id, ip=ip,
+                                user_agent=request.user_agent.string,
+                                details={"client_name": (body.get("client_name") or "Unnamed application")[:100]})
     cur.close(); conn.close()
     out = {
         "client_id": client_id, "client_name": body.get("client_name", "Unnamed application"),
@@ -553,6 +556,9 @@ def login():
 
                 allowed, retry_after = services.check_rate_limit(conn, f"otp_verify_ip:{ip}", 10, 300)
                 if not allowed:
+                    services.log_security_event(conn, "lockout", subject=f"citizen:{mobile}", ip=ip,
+                                                user_agent=request.user_agent.string,
+                                                details={"reason": "otp_lockout_exceeded"})
                     conn.close()
                     resp = render_template("oauth_login.html", rid=rid, role=role,
                                            client_name=req["params"]["client_name"],
@@ -567,13 +573,21 @@ def login():
                 )
                 row = cur.fetchone()
                 if not row:
-                    cur.close(); conn.close()
+                    cur.close()
+                    services.log_security_event(conn, "login_failure", subject=f"citizen:{mobile}", ip=ip,
+                                                user_agent=request.user_agent.string,
+                                                details={"reason": "otp_not_found"})
+                    conn.close()
                     flash("Invalid or expired OTP.")
                 else:
                     otp_id, db_code, created_at, attempts, used_at = row
                     age = (datetime.now() - created_at).total_seconds()
                     if used_at is not None or attempts >= 5 or age > portal.OTP_VALIDITY_SECONDS:
-                        cur.close(); conn.close()
+                        cur.close()
+                        services.log_security_event(conn, "login_failure", subject=f"citizen:{mobile}", ip=ip,
+                                                    user_agent=request.user_agent.string,
+                                                    details={"reason": "otp_expired_or_invalidated"})
+                        conn.close()
                         flash("Invalid or expired OTP.")
                     elif secrets.compare_digest(db_code, code):
                         cur.execute("UPDATE otps SET used_at = %s WHERE id = %s", (datetime.now(), otp_id))
@@ -584,7 +598,11 @@ def login():
                     else:
                         cur.execute("UPDATE otps SET attempts = attempts + 1 WHERE id = %s", (otp_id,))
                         conn.commit()
-                        cur.close(); conn.close()
+                        cur.close()
+                        services.log_security_event(conn, "login_failure", subject=f"citizen:{mobile}", ip=ip,
+                                                    user_agent=request.user_agent.string,
+                                                    details={"reason": "wrong_otp_code"})
+                        conn.close()
                         flash("Invalid or expired OTP.")
             else:
                 mobile = request.form.get("mobile", "").strip()
@@ -616,6 +634,9 @@ def login():
             ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
             user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
             if ip_limited or user_limited:
+                services.log_security_event(conn, "lockout", subject=f"officer:{username}", ip=ip,
+                                            user_agent=request.user_agent.string,
+                                            details={"reason": "officer_lockout_exceeded"})
                 conn.close()
                 retry_after = max(ip_retry, user_retry)
                 resp = render_template("oauth_login.html", rid=rid, role=role,
@@ -636,6 +657,9 @@ def login():
             else:
                 services.record_rate_limit_failure(conn, ip_key, 900)
                 services.record_rate_limit_failure(conn, user_key, 900)
+                services.log_security_event(conn, "login_failure", subject=f"officer:{username}", ip=ip,
+                                            user_agent=request.user_agent.string,
+                                            details={"reason": "invalid_credentials"})
                 conn.close()
                 flash("Invalid credentials.")
     return render_template("oauth_login.html", rid=rid, role=role,
@@ -841,6 +865,7 @@ def revoke():
         RETURNING subject
     """, (now, tok_hash))
     row = cur.fetchone()
+    subj = None
     if row:
         subj = row[0]
         cur.execute("""
@@ -850,6 +875,10 @@ def revoke():
         """, (subj, now))
 
     conn.commit()
+    rev_subj = sub if ('sub' in locals() and sub) else (subj if subj else "unknown")
+    services.log_security_event(conn, "token_revocation", subject=rev_subj, ip=_get_client_ip(),
+                                user_agent=request.user_agent.string,
+                                details={"token_type": f.get("token_type_hint", "unknown")})
     cur.close(); conn.close()
     return ("", 200)
 

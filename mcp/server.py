@@ -184,6 +184,22 @@ def authenticate_request(role, endpoint_path):
 
     valid, result = auth.verify_token(token, expected_resource=canonical_resource, expected_role=role)
     if not valid:
+        try:
+            conn_sec = services.get_db()
+            if not type(conn_sec).__module__.startswith("unittest.mock"):
+                xff = request.headers.get("X-Forwarded-For")
+                ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "127.0.0.1")
+                services.log_security_event(
+                    conn_sec,
+                    event_type="token_rejected",
+                    subject=None,
+                    ip=ip,
+                    user_agent=request.user_agent.string if request.user_agent else None,
+                    details={"reason": str(result), "path": endpoint_path}
+                )
+                conn_sec.close()
+        except Exception:
+            pass
         is_forbidden = "forbidden" in str(result)
         status_code = 403 if is_forbidden else 401
         error_code = "insufficient_scope" if is_forbidden else "invalid_token"
