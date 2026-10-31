@@ -13,7 +13,10 @@ from datetime import datetime, timedelta
 import sys
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
-import services
+try:
+    import services
+except ImportError:
+    from app import services
 
 SLA_DAYS = 15
 

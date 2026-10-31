@@ -1,0 +1,12 @@
+{
+  "include": [
+    "app",
+    "mcp",
+    "tests",
+    "evals"
+  ],
+  "extraPaths": [
+    "app",
+    "mcp"
+  ]
+}

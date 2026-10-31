@@ -1,0 +1,10 @@
+{
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/app",
+    "${workspaceFolder}/mcp"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/app",
+    "${workspaceFolder}/mcp"
+  ]
+}

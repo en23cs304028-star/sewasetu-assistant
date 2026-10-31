@@ -24,7 +24,10 @@ sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 import auth
 import citizen
 import officer
-import services
+try:
+    import services
+except ImportError:
+    from app import services
 
 logger = logging.getLogger("sewasetu.mcp")
 

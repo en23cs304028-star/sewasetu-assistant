@@ -15,7 +15,10 @@ from datetime import datetime
 import sys
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
-import services
+try:
+    import services
+except ImportError:
+    from app import services
 from auth import revoke_citizen_session
 
 # Deprecated in-memory store retained as empty dict for test setUp backward-compatibility
