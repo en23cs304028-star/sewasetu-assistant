@@ -4,7 +4,7 @@
 **Repository:** `sewasetu-assistant`  
 **Base Handout:** Department of Social Welfare, Government of Purvanchal — Old Age Pension Scheme  
 **Production Server:** `https://20-2-138-38.sslip.io`  
-**Target Git Head:** `4a2491f`  
+**Target Git Head:** `fd8e057`  
 
 ---
 
@@ -71,7 +71,7 @@ The Sewa Setu portal and Model Context Protocol (MCP) servers are fully hardened
 
 ## 3. Git Commit History (Chronological Milestone Overview)
 
-The repository has advanced 26 commits on top of `origin/main` (`bc2b23b`), creating a fully verifiable, hardened codebase:
+The repository has advanced 28 commits on top of `origin/main` (`bc2b23b`), creating a fully verifiable, hardened codebase:
 
 1. `2559c6e` — **Security hygiene:** Enforce `ADMIN_PASSWORD` from environment, remove hardcoded defaults, ignore zip and env files, and read pension amount from config.
 2. `5810f36` — **Fix eval dashboard route tests:** Add test verifying refusal to start without `ADMIN_PASSWORD`.
@@ -99,6 +99,8 @@ The repository has advanced 26 commits on top of `origin/main` (`bc2b23b`), crea
 24. `c34c174` — **Phase 4b:** Infrastructure hardening, security headers, container least-privilege, and corrections.
 25. `6ca2275` — **Group 4:** Rehearsal fixes for Caddy `NET_BIND_SERVICE`, scheduler cron env, and TLS smoke test.
 26. `4a2491f` — **VM Fix:** Add `confirmation_tokens` to `schema.sql`, add PostgreSQL advisory lock and fatal error handling to `ensure_all_tables`, and robustify healthchecks and scripts.
+27. `f4b6991` — **Docs & Evals:** Update `HANDOFF.md`, `README.md`, and `LOOM_SCRIPT.md` to reflect live deployment, 168 tests, and 100% eval pass rate.
+28. `fd8e057` — **Test Resilience:** Guard duplicate application check against non-list mock objects during standalone unit test discovery.
 
 ---
 
