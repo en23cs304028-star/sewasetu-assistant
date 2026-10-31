@@ -1,6 +1,15 @@
 # Caddyfile for Sewa Setu Production Deployment with HTTPS
 # Set DOMAIN environment variable (e.g., sewasetu.example.com or duckdns domain)
 {$DOMAIN:localhost} {
+    # Global security headers & request body limit
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+    request_body {
+        max_size 1MB
+    }
+
     # Route RFC 9728 discovery and MCP endpoints to the MCP server
     handle /.well-known/oauth-protected-resource* {
         reverse_proxy mcp:8010 {

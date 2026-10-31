@@ -48,7 +48,15 @@ def get_db(cfg=None):
     port = int(os.environ.get("PGPORT") or cfg.getint("database", "port", fallback=5432))
     dbname = os.environ.get("PGDATABASE") or cfg.get("database", "name", fallback="sewasetu")
     user = os.environ.get("PGUSER") or cfg.get("database", "user", fallback="sewasetu")
-    password = os.environ.get("PGPASSWORD") or cfg.get("database", "password", fallback="sewasetu123")
+    raw_pwd = os.environ.get("POSTGRES_PASSWORD") or os.environ.get("PGPASSWORD")
+    if not raw_pwd:
+        raw_pwd = cfg.get("database", "password", fallback="").strip()
+    password = raw_pwd or "sewasetu123"
+
+    is_production = os.environ.get("ENV", "").lower() == "production" or os.environ.get("FLASK_ENV", "").lower() == "production"
+    if is_production:
+        if not password or password in ("sewasetu123", "password", "admin", "default", "changeme") or len(password) < 16:
+            raise RuntimeError("In production, database password (POSTGRES_PASSWORD / PGPASSWORD) must be set, not 'sewasetu123', and at least 16 characters long.")
     return psycopg2.connect(
         host=host,
         port=port,

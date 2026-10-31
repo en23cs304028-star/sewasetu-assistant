@@ -36,6 +36,16 @@ except Exception:
 
 app = Flask(__name__)
 
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    response.headers["Server"] = "sewasetu"
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
 # Citizen tool schemas (6 tools)
 CITIZEN_TOOLS = [
     {
@@ -70,8 +80,7 @@ CITIZEN_TOOLS = [
                 "bank_account": {"type": "string", "description": "Bank account number (9 to 18 digits)"},
                 "ifsc": {"type": "string", "description": "Bank branch IFSC code (11 characters)"},
                 "document_filename": {"type": "string", "description": "Optional uploaded document filename"},
-                "document_base64": {"type": "string", "description": "Optional uploaded document content in base64"},
-                "citizen_id": {"type": "string", "description": "Optional citizen identifier"}
+                "document_base64": {"type": "string", "description": "Optional uploaded document content in base64"}
             },
             "required": ["applicant_name", "dob", "village", "block", "bank_account", "ifsc"]
         }

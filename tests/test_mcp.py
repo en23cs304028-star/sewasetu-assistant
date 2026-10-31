@@ -346,7 +346,7 @@ class TestMCPServers(unittest.TestCase):
         mock_conn.cursor.return_value = mock_cur
         # Step 1: SELECT app -> returns pending app details
         mock_cur.fetchone.return_value = ("SSP26123456", "Applicant", "Village", "Sonari", "PENDING")
-
+ 
         with patch.object(auth, "get_public_keys_from_db", return_value=self.keys_dict), \
              patch.object(services, "get_db", return_value=mock_conn):
             # Step 1: Call without confirmation_token -> confirmation required

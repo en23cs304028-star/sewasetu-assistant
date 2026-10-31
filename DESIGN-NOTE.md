@@ -69,3 +69,14 @@ To maintain rigorous engineering honesty, our evaluation suite separates determi
   - Uses Claude Code in headless mode (`claude -p --model haiku --max-turns 10`) configured with an MCP config pointing to the live streamable HTTP endpoint.
   - When API credentials are configured, it executes live conversational turns and verifies end-to-end multi-turn tool calling.
 - **Live Status Dashboard (`/eval-dashboard`):** Real-time portal view reporting both tiers with complete transparency, transcripts, and before-and-after change notes.
+
+---
+
+## 5. Security & Governance Considerations
+
+### Officer Confirmation & Two-Step Token Tradeoffs
+The two-step confirmation token pattern (`decide_application` requiring a preview call followed by confirmation with `confirmation_token`) introduces valuable friction, dedicated audit trails, and per-officer rate limits. However, an autonomous LLM agent equipped with full tool-calling autonomy can simply execute the preparation step and immediately pass the resulting confirmation token to execute the action in sequence. Therefore, the server-side token alone cannot prevent a compromised or misbehaving agent from completing destructive operations without human intervention; robust defense relies on client-side confirmation prompts (e.g. MCP client interactive user approvals for destructive tools). Enforcing true out-of-band human confirmation via web portal approval before finalizing high-impact decisions remains essential future work.
+
+### Database Migration Role vs Runtime Role
+Currently, application startup invokes `services.ensure_all_tables(conn)` which runs DDL statements (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) using the default application runtime database connection. In a hardened defense-in-depth architecture, this represents a privilege conflict: runtime services should operate strictly under a least-privilege role possessing only DML permissions (`SELECT`, `INSERT`, `UPDATE`, `DELETE`), preventing any potential SQL injection vulnerability from modifying or dropping schema objects. Separating database lifecycle management into a dedicated migration container or CI/CD job using a high-privilege migration role (`sewasetu_migrator`), while restricting runtime containers to a DML-only role (`sewasetu_app`), is planned as future work.
+

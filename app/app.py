@@ -59,9 +59,9 @@ DEFAULT_PASSWORDS = {"admin", "password", "sewasetu", "sewasetu123", "default", 
 if is_production:
     if not ADMIN_PASSWORD or ADMIN_PASSWORD.lower() in DEFAULT_PASSWORDS or len(ADMIN_PASSWORD) < 16:
         raise RuntimeError("In production, ADMIN_PASSWORD must be set, not a default password, and at least 16 characters long.")
-    db_pass = os.environ.get("PGPASSWORD") or config.get("database", "password", fallback="sewasetu123")
-    if db_pass == "sewasetu123":
-        logger.warning("SECURITY WARNING: Using default database password 'sewasetu123' in production environment!")
+    db_pass = os.environ.get("POSTGRES_PASSWORD") or os.environ.get("PGPASSWORD") or config.get("database", "password", fallback="").strip()
+    if not db_pass or db_pass.lower() in DEFAULT_PASSWORDS or len(db_pass) < 16:
+        raise RuntimeError("In production, database password (POSTGRES_PASSWORD / PGPASSWORD) must be set, not 'sewasetu123', and at least 16 characters long.")
 elif not ADMIN_PASSWORD:
     raise RuntimeError("ADMIN_PASSWORD environment variable must be set. The application will not start without it.")
 
@@ -192,6 +192,33 @@ def create_application(cur, mobile, cleaned):
 # ---------------------------------------------------------------------------
 # Public pages
 # ---------------------------------------------------------------------------
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; "
+        "img-src 'self' data:; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'; "
+        "base-uri 'self'"
+    )
+    response.headers["Server"] = "sewasetu"
+
+    path = request.path
+    if (path.startswith("/oauth/") or
+        path.startswith("/api/") or
+        path.startswith("/admin/") or
+        path in ("/login", "/verify", "/declaration", "/status", "/apply", "/admin/login", "/admin/tokens", "/eval-dashboard") or
+        response.mimetype == "application/json"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+
+    return response
+
 
 @app.route("/")
 def index():

@@ -300,26 +300,39 @@ class TestDurableDraftsPostgres(unittest.TestCase):
         conn.close()
 
     def test_06_token_vs_session_and_spoofed_citizen_id(self):
-        """Mcp-Session-Id header or arguments cannot spoof draft ownership."""
+        """Mcp-Session-Id header or arguments cannot spoof draft ownership. citizen_id in args rejected with -32602."""
         mobile = "9990003008"
         token = self.mint_token(mobile)
 
         client = server.app.test_client()
         data = self.get_valid_prepare_data()
-        # Pass spoofed citizen_id in body
+        # 1. Attempt passing citizen_id in arguments -> must be rejected with -32602 Unknown argument
         data["citizen_id"] = "9999999999"
 
-        resp = client.post(
+        resp_bad = client.post(
             "/mcp/citizen",
             headers={"Authorization": f"Bearer {token}", "Mcp-Session-Id": "spoofed-session-id"},
             json={"method": "tools/call", "params": {"name": "prepare_application", "arguments": data}, "id": 1}
         )
-        self.assertEqual(resp.status_code, 200)
-        c = json.loads(resp.get_json()["result"]["content"][0]["text"])
+        self.assertEqual(resp_bad.status_code, 200)
+        res_json = resp_bad.get_json()
+        self.assertIn("error", res_json, "Must return JSON-RPC error when citizen_id argument is supplied")
+        self.assertEqual(res_json["error"]["code"], -32602)
+        self.assertIn("Unknown argument 'citizen_id'", res_json["error"]["message"])
+
+        # 2. Call without citizen_id -> succeeds, ownership derived solely from token subject
+        del data["citizen_id"]
+        resp_good = client.post(
+            "/mcp/citizen",
+            headers={"Authorization": f"Bearer {token}", "Mcp-Session-Id": "spoofed-session-id"},
+            json={"method": "tools/call", "params": {"name": "prepare_application", "arguments": data}, "id": 2}
+        )
+        self.assertEqual(resp_good.status_code, 200)
+        c = json.loads(resp_good.get_json()["result"]["content"][0]["text"])
         self.assertEqual(c["status"], "ready_for_confirmation")
         draft_id = c["draft_id"]
 
-        # Check DB: citizen_id must strictly match the token subject (mobile), not spoofed values
+        # 3. Check DB: citizen_id must strictly match the token subject (mobile), not spoofed session or arguments
         conn = services.get_db()
         cur = conn.cursor()
         cur.execute("SELECT citizen_id FROM drafts WHERE draft_id = %s", (draft_id,))
@@ -446,17 +459,36 @@ class TestDurableDraftsPostgres(unittest.TestCase):
             self.assertEqual(sub_res["status"], "submitted")
             self.assertTrue(sub_res["application_number"].startswith("SSP"))
         finally:
-            pa.terminate()
-            pb.terminate()
-            pa.wait()
-            pb.wait()
+            for p in (pa, pb):
+                if p is not None:
+                    try:
+                        p.terminate()
+                        p.wait(timeout=1.5)
+                    except Exception:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
 
     def test_10_multi_process_concurrent_race(self):
-        """Concurrent race: N parallel submit workers across two server processes for 10 repetitions."""
+        """Concurrent race: N parallel submit workers across two Gunicorn server processes (2 workers, 4 threads each) for 10 repetitions."""
         port_a, port_b = 8874, 8875
-        pa = subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "mcp", "server.py")], env=self._get_subprocess_env(port_a))
-        pb = subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "mcp", "server.py")], env=self._get_subprocess_env(port_b))
-        time.sleep(1.5)
+        env_a = self._get_subprocess_env(port_a)
+        env_b = self._get_subprocess_env(port_b)
+        env_a["PYTHONPATH"] = f"{os.path.join(BASE_DIR, 'app')}:{os.path.join(BASE_DIR, 'mcp')}"
+        env_b["PYTHONPATH"] = f"{os.path.join(BASE_DIR, 'app')}:{os.path.join(BASE_DIR, 'mcp')}"
+
+        pa = subprocess.Popen([sys.executable, "-m", "gunicorn", "-w", "2", "--threads", "4", "-b", f"127.0.0.1:{port_a}", "server:app"], env=env_a, cwd=os.path.join(BASE_DIR, "mcp"))
+        pb = subprocess.Popen([sys.executable, "-m", "gunicorn", "-w", "2", "--threads", "4", "-b", f"127.0.0.1:{port_b}", "server:app"], env=env_b, cwd=os.path.join(BASE_DIR, "mcp"))
+
+        for port in (port_a, port_b):
+            for _ in range(40):
+                try:
+                    r = requests.get(f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource/mcp/citizen", timeout=0.5)
+                    if r.status_code == 200:
+                        break
+                except Exception:
+                    time.sleep(0.1)
 
         repetitions = 10
         workers_count = 8
@@ -539,10 +571,16 @@ class TestDurableDraftsPostgres(unittest.TestCase):
                 print(f"  -> Repetition {rep}/{repetitions}: winner port={winner_port} | losers={loser_reasons} | DB rows={app_count} (PASS)")
 
         finally:
-            pa.terminate()
-            pb.terminate()
-            pa.wait()
-            pb.wait()
+            for p in (pa, pb):
+                if p is not None:
+                    try:
+                        p.terminate()
+                        p.wait(timeout=1.5)
+                    except Exception:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
 
     def test_11_timezone_matrix_and_cross_tz_verification(self):
         """Prepare, submit, and expiry behave identically across UTC, Asia/Kolkata, and negative-offset zones."""
