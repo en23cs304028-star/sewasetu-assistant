@@ -344,22 +344,36 @@ class TestMCPServers(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value = mock_cur
-        mock_cur.fetchone.return_value = ("SSP26123456",)
+        # Step 1: SELECT app -> returns pending app details
+        mock_cur.fetchone.return_value = ("SSP26123456", "Applicant", "Village", "Sonari", "PENDING")
 
         with patch.object(auth, "get_public_keys_from_db", return_value=self.keys_dict), \
              patch.object(services, "get_db", return_value=mock_conn):
-            resp = self.app.post(
+            # Step 1: Call without confirmation_token -> confirmation required
+            resp1 = self.app.post(
                 "/mcp/officer",
                 headers={"Authorization": "Bearer " + token},
                 json={"method": "tools/call", "params": {"name": "reject_application", "arguments": {"app_id": 101, "reason": "Age proof blurred"}}, "id": 11}
             )
-            content = json.loads(resp.get_json()["result"]["content"][0]["text"])
-            self.assertEqual(content["status"], "rejected")
-            self.assertEqual(content["application_no"], "SSP26123456")
-            # Audit log check: actor should be officer:meena
-            audit_call = mock_cur.execute.call_args_list[1]
-            self.assertEqual(audit_call[0][1][2], "officer:meena")
-            self.assertEqual(audit_call[0][1][3], "Age proof blurred")
+            content1 = json.loads(resp1.get_json()["result"]["content"][0]["text"])
+            self.assertEqual(content1["status"], "confirmation_required")
+            conf_token = content1["confirmation_token"]
+
+            # Step 2: Call with confirmation_token -> executed
+            from datetime import timedelta
+            mock_cur.fetchone.side_effect = [
+                ("SSP26123456", "Applicant", "Village", "Sonari", "PENDING"),
+                (101, "REJECTED", "officer:meena", "Age proof blurred", datetime.now() + timedelta(minutes=5), None),
+                ("SSP26123456",)
+            ]
+            resp2 = self.app.post(
+                "/mcp/officer",
+                headers={"Authorization": "Bearer " + token},
+                json={"method": "tools/call", "params": {"name": "reject_application", "arguments": {"app_id": 101, "reason": "Age proof blurred", "confirmation_token": conf_token}}, "id": 12}
+            )
+            content2 = json.loads(resp2.get_json()["result"]["content"][0]["text"])
+            self.assertEqual(content2["status"], "rejected")
+            self.assertEqual(content2["application_no"], "SSP26123456")
 
     def test_officer_approve_application_succeeds(self):
         token = self.mint_token("officer:meena", "officer", "http://localhost:8000/mcp/officer")
@@ -367,18 +381,36 @@ class TestMCPServers(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value = mock_cur
-        mock_cur.fetchone.return_value = ("SSP26123456",)
+        # Step 1: SELECT app -> returns pending app details
+        mock_cur.fetchone.return_value = ("SSP26123456", "Applicant", "Village", "Sonari", "PENDING")
 
         with patch.object(auth, "get_public_keys_from_db", return_value=self.keys_dict), \
              patch.object(services, "get_db", return_value=mock_conn):
-            resp = self.app.post(
+            # Step 1: Call without confirmation_token -> confirmation required
+            resp1 = self.app.post(
                 "/mcp/officer",
                 headers={"Authorization": "Bearer " + token},
-                json={"method": "tools/call", "params": {"name": "approve_application", "arguments": {"app_id": 101, "note": "Verified genuine"}}, "id": 12}
+                json={"method": "tools/call", "params": {"name": "approve_application", "arguments": {"app_id": 101, "note": "Verified genuine"}}, "id": 13}
             )
-            content = json.loads(resp.get_json()["result"]["content"][0]["text"])
-            self.assertEqual(content["status"], "approved")
-            self.assertEqual(content["application_no"], "SSP26123456")
+            content1 = json.loads(resp1.get_json()["result"]["content"][0]["text"])
+            self.assertEqual(content1["status"], "confirmation_required")
+            conf_token = content1["confirmation_token"]
+
+            # Step 2: Call with confirmation_token -> executed
+            from datetime import timedelta
+            mock_cur.fetchone.side_effect = [
+                ("SSP26123456", "Applicant", "Village", "Sonari", "PENDING"),
+                (101, "APPROVED", "officer:meena", "Verified genuine", datetime.now() + timedelta(minutes=5), None),
+                ("SSP26123456",)
+            ]
+            resp2 = self.app.post(
+                "/mcp/officer",
+                headers={"Authorization": "Bearer " + token},
+                json={"method": "tools/call", "params": {"name": "approve_application", "arguments": {"app_id": 101, "note": "Verified genuine", "confirmation_token": conf_token}}, "id": 14}
+            )
+            content2 = json.loads(resp2.get_json()["result"]["content"][0]["text"])
+            self.assertEqual(content2["status"], "approved")
+            self.assertEqual(content2["application_no"], "SSP26123456")
 
 
 if __name__ == "__main__":

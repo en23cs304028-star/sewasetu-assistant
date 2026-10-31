@@ -130,7 +130,9 @@ def secure_compare(val1, val2) -> bool:
 def sanitize(value, maxlen=100):
     if value is None:
         return ""
-    return str(value).strip()[:maxlen]
+    # Strip NUL and ASCII control characters (preserving no html.escape on input)
+    s = re.sub(r"[\x00-\x1f\x7f]", "", str(value))
+    return s.strip()[:maxlen]
 
 
 def hash_password(p):
@@ -158,9 +160,10 @@ def send_sms(mobile, text, cfg=None, timeout=5):
 
 
 def write_audit(cur, app_id, action, actor, note=""):
+    clean_note = sanitize(note, maxlen=500)
     cur.execute("INSERT INTO audit_log (application_id, action, actor, note, at) "
                 "VALUES (%s, %s, %s, %s, %s)",
-                (app_id, action, actor, note, datetime.now()))
+                (app_id, action, actor, clean_note, datetime.now()))
 
 
 def parse_dob(raw):
@@ -295,10 +298,11 @@ def create_application(cur, mobile, cleaned, actor=None):
 
 def decide_application(cur, app_id, new_status, actor, note=""):
     """Approve or reject a PENDING application atomically.
-    Requires reason if rejecting.
+    Requires reason if rejecting. Caps note length at 500 characters.
     Returns (success: bool, message: str, application_no: str or None)
     """
-    if new_status == "REJECTED" and not (note or "").strip():
+    clean_note = sanitize(note, maxlen=500)
+    if new_status == "REJECTED" and not clean_note:
         return False, "A specific reason is mandatory when rejecting an application.", None
 
     now = datetime.now()
@@ -308,7 +312,7 @@ def decide_application(cur, app_id, new_status, actor, note=""):
     row = cur.fetchone()
     if row:
         app_no = row[0]
-        write_audit(cur, app_id, new_status, actor, note.strip())
+        write_audit(cur, app_id, new_status, actor, clean_note)
         return True, "Application %s %s." % (app_no, new_status.lower()), app_no
 
     # If rowcount was 0, check real current status

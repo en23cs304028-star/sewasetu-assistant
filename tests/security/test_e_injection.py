@@ -137,8 +137,10 @@ class TestThreatEInjection(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
 
     def test_e4_embedded_null_byte_handling(self):
-        """[FAIL EXPECTED] Embedded null bytes in input strings cause unhandled ValueError from psycopg2."""
+        """Embedded null bytes in input strings are stripped by services.sanitize() to prevent DB errors."""
         null_byte_str = "Sundari\x00Bai"
+        clean_name = services.sanitize(null_byte_str)
+        self.assertNotIn("\x00", clean_name)
         conn = services.get_db()
         cur = conn.cursor()
         failed_with_null_byte = False
@@ -146,8 +148,11 @@ class TestThreatEInjection(unittest.TestCase):
             cur.execute(
                 """INSERT INTO applications (application_no, applicant_name, mobile, dob, village, block, bank_account, ifsc, status, submitted_at)
                    VALUES ('SSP_NULL_TEST', %s, '9990009997', '1950-01-01', 'Sonari', 'Sonari', '999988887776', 'SBIN0003077', 'PENDING', NOW())""",
-                (null_byte_str,)
+                (clean_name,)
             )
+            conn.commit()
+            # Clean up test row
+            cur.execute("DELETE FROM applications WHERE application_no = 'SSP_NULL_TEST'")
             conn.commit()
         except ValueError as e:
             conn.rollback()

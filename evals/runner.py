@@ -290,11 +290,25 @@ def run_evals():
             transcript.append({"speaker": "assistant", "tool_call": "queue_summary", "response": summary})
             checks.append({"check": "urgent_cutoff_identified", "passed": summary.get("nearing_deemed_approval_cutoff_count") == 1})
 
-            # Approve application
-            mock_cur.fetchone.return_value = ("SSP26000101",)
+            # Approve application in two steps
+            # Step 1: Confirmation required
+            mock_cur.fetchone.return_value = ("SSP26000101", "Kamala Borah", "Sonari", "Sonari", "PENDING")
             with patch.object(services, "get_db", return_value=mock_conn):
-                app_res = officer.approve_application(101, "meena_bdo", "Document verified and genuine.")
-            transcript.append({"speaker": "assistant", "tool_call": "approve_application", "response": app_res})
+                conf_res = officer.approve_application(101, "meena_bdo", "Document verified and genuine.")
+            transcript.append({"speaker": "assistant", "tool_call": "approve_application", "response": conf_res})
+            checks.append({"check": "officer_confirmation_required", "passed": conf_res.get("status") == "confirmation_required"})
+            conf_tok = conf_res.get("confirmation_token")
+
+            # Step 2: Final approval with token
+            mock_cur.fetchone.side_effect = [
+                ("SSP26000101", "Kamala Borah", "Sonari", "Sonari", "PENDING"),
+                (101, "APPROVED", "officer:meena_bdo", "Document verified and genuine.", datetime.now() + timedelta(minutes=5), None),
+                ("SSP26000101",)
+            ]
+            with patch.object(services, "get_db", return_value=mock_conn), \
+                 patch.object(services, "check_rate_limit", return_value=(True, 0)):
+                app_res = officer.approve_application(101, "meena_bdo", "Document verified and genuine.", confirmation_token=conf_tok)
+            transcript.append({"speaker": "assistant", "tool_call": "approve_application_confirmed", "response": app_res})
             checks.append({"check": "officer_approve_success", "passed": app_res.get("status") == "approved"})
 
         elif pid == "persona_11_officer_meena_reject_with_reason":
@@ -307,11 +321,25 @@ def run_evals():
             fail_res = officer.reject_application(102, "meena_bdo", "")
             checks.append({"check": "reject_without_reason_blocked", "passed": fail_res.get("status") == "error"})
 
-            # 2. Reject with reason succeeds
-            mock_cur.fetchone.return_value = ("SSP26000102",)
+            # 2. Reject with reason in two steps
+            # Step 1: Confirmation required
+            mock_cur.fetchone.return_value = ("SSP26000102", "Biren Deka", "Rajapara", "Rajapara", "PENDING")
             with patch.object(services, "get_db", return_value=mock_conn):
-                rej_res = officer.reject_application(102, "meena_bdo", "Age proof certificate is unreadable and forged.")
-            transcript.append({"speaker": "assistant", "tool_call": "reject_application", "response": rej_res})
+                conf_res = officer.reject_application(102, "meena_bdo", "Age proof certificate is unreadable and forged.")
+            transcript.append({"speaker": "assistant", "tool_call": "reject_application", "response": conf_res})
+            checks.append({"check": "officer_confirmation_required", "passed": conf_res.get("status") == "confirmation_required"})
+            conf_tok = conf_res.get("confirmation_token")
+
+            # Step 2: Final rejection with token
+            mock_cur.fetchone.side_effect = [
+                ("SSP26000102", "Biren Deka", "Rajapara", "Rajapara", "PENDING"),
+                (102, "REJECTED", "officer:meena_bdo", "Age proof certificate is unreadable and forged.", datetime.now() + timedelta(minutes=5), None),
+                ("SSP26000102",)
+            ]
+            with patch.object(services, "get_db", return_value=mock_conn), \
+                 patch.object(services, "check_rate_limit", return_value=(True, 0)):
+                rej_res = officer.reject_application(102, "meena_bdo", "Age proof certificate is unreadable and forged.", confirmation_token=conf_tok)
+            transcript.append({"speaker": "assistant", "tool_call": "reject_application_confirmed", "response": rej_res})
             checks.append({"check": "reject_with_reason_succeeded", "passed": rej_res.get("status") == "rejected"})
 
         elif pid == "persona_12_officer_already_decided_conflict":
@@ -319,12 +347,12 @@ def run_evals():
             mock_conn = MagicMock()
             mock_cur = MagicMock()
             mock_conn.cursor.return_value = mock_cur
-            # UPDATE returns None (already decided), SELECT returns DEEMED_APPROVED
-            mock_cur.fetchone.side_effect = [None, ("SSP26000103", "DEEMED_APPROVED")]
+            # SELECT app returns ("SSP26000103", "Decided User", "Sonari", "Sonari", "DEEMED_APPROVED")
+            mock_cur.fetchone.return_value = ("SSP26000103", "Decided User", "Sonari", "Sonari", "DEEMED_APPROVED")
             with patch.object(services, "get_db", return_value=mock_conn):
                 res = officer.approve_application(103, "meena_bdo", "Late approval")
             transcript.append({"speaker": "assistant", "tool_call": "approve_application", "response": res})
-            checks.append({"check": "conflict_reported_gracefully", "passed": "already decided" in res.get("message", "")})
+            checks.append({"check": "conflict_reported_gracefully", "passed": "already decided" in (res.get("message") or res.get("error") or "")})
 
         elif pid == "persona_13_integration_scheme_deadline_closed":
             mock_cfg = MagicMock()

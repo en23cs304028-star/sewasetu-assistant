@@ -61,11 +61,13 @@ def send():
 @app.route("/api/messages")
 def messages():
     # Inbox query for a given number. Used to read delivered OTPs/SMS.
-    to = request.args.get("to", "")
+    to = request.args.get("to", "").strip()
+    if not to:
+        return jsonify({"messages": []})
     now = time.time()
     out = []
     for m in MESSAGES:
-        if to and m["to"] != to:
+        if m["to"] != to:
             continue
         out.append({
             "id": m["id"], "to": m["to"],
@@ -78,16 +80,19 @@ def messages():
 
 @app.route("/")
 def console():
+    to = request.args.get("to", "").strip()
     now = time.time()
     view = []
-    for m in reversed(MESSAGES[-100:]):
-        view.append({
-            "id": m["id"], "to": m["to"], "text": m["text"],
-            "sent_hhmm": time.strftime("%H:%M:%S", time.localtime(m["sent_at"])),
-            "delivered": now >= m["delivery_at"],
-            "eta": max(0, int(m["delivery_at"] - now)),
-        })
-    return render_template_string(CONSOLE, messages=view)
+    if to:
+        for m in reversed(MESSAGES[-100:]):
+            if m["to"] == to:
+                view.append({
+                    "id": m["id"], "to": m["to"], "text": m["text"],
+                    "sent_hhmm": time.strftime("%H:%M:%S", time.localtime(m["sent_at"])),
+                    "delivered": now >= m["delivery_at"],
+                    "eta": max(0, int(m["delivery_at"] - now)),
+                })
+    return render_template_string(CONSOLE, messages=view, to=to)
 
 
 if __name__ == "__main__":

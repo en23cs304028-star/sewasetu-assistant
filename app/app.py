@@ -141,11 +141,7 @@ def get_db():
 
 
 def sanitize(value, maxlen=100):
-    # Trim whitespace and cap at the column width, counting characters (not
-    # bytes) so Assamese/Bangla names are stored intact.
-    if value is None:
-        return ""
-    return value.strip()[:maxlen]
+    return services.sanitize(value, maxlen=maxlen)
 
 
 def hash_password(p):
@@ -210,12 +206,31 @@ def about():
 @app.route("/__gateway/", defaults={"subpath": ""})
 @app.route("/__gateway/<path:subpath>")
 def gateway_proxy(subpath):
-    # Convenience proxy to the internal SMS gateway, so the OTP inbox is reachable
-    # on the main site without opening a second port on the host. The gateway
-    # itself runs only on the internal network.
+    """
+    Demo SMS inbox proxy for simulated phone inbox. Gated behind DEMO_GATEWAY=true.
+    Requires ?to= parameter, rate limits per IP, and returns only that recipient's messages.
+    """
+    demo_enabled = os.environ.get("DEMO_GATEWAY", "false").lower() in ("true", "1", "yes")
+    if not demo_enabled:
+        return ("Demo gateway disabled.", 404)
+
+    ip = services.get_client_ip(request)
+    try:
+        conn = services.get_db()
+        allowed, retry_after = services.check_rate_limit(conn, f"demo_gw:{ip}", max_attempts=60, window_seconds=60)
+        conn.close()
+        if not allowed:
+            return ("Rate limit exceeded. Please wait.", 429)
+    except Exception:
+        pass
+
+    to = request.args.get("to", "").strip()
+    if not to:
+        return ("Recipient parameter 'to' is required. E.g. /__gateway/api/messages?to=9990001001", 400)
+
     try:
         r = requests.get(SMS_GATEWAY_URL + "/" + subpath,
-                         params=request.args, timeout=5)
+                         params={"to": to}, timeout=5)
         return (r.content, r.status_code,
                 {"Content-Type": r.headers.get("Content-Type", "text/html")})
     except Exception as e:

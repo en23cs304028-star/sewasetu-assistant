@@ -15,7 +15,7 @@ import json
 import base64
 import hashlib
 import configparser
-from datetime import datetime
+from datetime import datetime, date
 import jwt
 from cryptography.hazmat.primitives import serialization
 

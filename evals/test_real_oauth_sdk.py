@@ -551,11 +551,21 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                 assert app_id_1 is not None, f"Application 1 {app_no_1} not found in pending list"
                 assert app_id_2 is not None, f"Application 2 {app_no_2} not found in pending list"
 
-                # Step 4: Officer approves Application 1
+                # Step 4: Officer approves Application 1 (two-step confirmation)
                 print(f"\n--- Step 4: Officer approves Application 1 (ID: {app_id_1}) ---")
-                appr_res = await session.call_tool("approve_application", {
+                conf_req = await session.call_tool("approve_application", {
                     "app_id": app_id_1,
                     "note": f"Verification passed for {app_no_1}; valid age proof."
+                })
+                conf_data = json.loads(conf_req.content[0].text)
+                print(f"Step 1 Confirmation Request: {conf_data}")
+                assert conf_data.get("status") == "confirmation_required", f"Expected confirmation_required, got {conf_data}"
+                conf_token = conf_data["confirmation_token"]
+
+                appr_res = await session.call_tool("approve_application", {
+                    "app_id": app_id_1,
+                    "note": f"Verification passed for {app_no_1}; valid age proof.",
+                    "confirmation_token": conf_token
                 })
                 appr_data = json.loads(appr_res.content[0].text)
                 print(f"Approve Result: {appr_data}")
@@ -573,13 +583,23 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                 assert rej_fail_data.get("status") == "error", f"Reject without reason was not blocked: {rej_fail_data}"
                 print("P0-4 Rule Verified: Rejection without mandatory reason is refused.")
 
-                # 5b. Reject with valid specific reason
-                rej_res = await session.call_tool("reject_application", {
+                # 5b. Reject with valid specific reason (two-step confirmation)
+                conf_req_rej = await session.call_tool("reject_application", {
                     "app_id": app_id_2,
                     "reason": f"Age proof certificate for {app_no_2} is unreadable and unverifiable."
                 })
+                conf_rej_data = json.loads(conf_req_rej.content[0].text)
+                print(f"Step 1 Reject Confirmation Request: {conf_rej_data}")
+                assert conf_rej_data.get("status") == "confirmation_required", f"Expected confirmation_required, got {conf_rej_data}"
+                conf_rej_token = conf_rej_data["confirmation_token"]
+
+                rej_res = await session.call_tool("reject_application", {
+                    "app_id": app_id_2,
+                    "reason": f"Age proof certificate for {app_no_2} is unreadable and unverifiable.",
+                    "confirmation_token": conf_rej_token
+                })
                 rej_data = json.loads(rej_res.content[0].text)
-                print(f"Reject with reason response: {rej_data}")
+                print(f"Step 2 Reject with reason response: {rej_data}")
                 assert rej_data.get("status") == "rejected", f"Rejection failed: {rej_data}"
 
                 # Step 6: Verify decisions reflected in citizen get_my_status (P0-3)
