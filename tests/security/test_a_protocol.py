@@ -32,6 +32,7 @@ os.environ.setdefault("PGDATABASE", "sewasetu")
 os.environ.setdefault("PGUSER", "sewasetu")
 os.environ.setdefault("PGPASSWORD", "sewasetu123")
 os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
+os.environ.setdefault("SCHEME_DEADLINE", "2026-12-31 23:59")
 
 import server
 import auth

@@ -25,10 +25,14 @@ import importlib.util
 if "services" in sys.modules:
     services = sys.modules["services"]
 else:
-    _services_spec = importlib.util.spec_from_file_location("services", os.path.join(BASE_DIR, "app", "services.py"))
-    services = importlib.util.module_from_spec(_services_spec)
-    sys.modules["services"] = services
-    _services_spec.loader.exec_module(services)
+    app_services_path = os.path.join(BASE_DIR, "app", "services.py")
+    if os.path.exists(app_services_path):
+        _services_spec = importlib.util.spec_from_file_location("services", app_services_path)
+        services = importlib.util.module_from_spec(_services_spec)
+        sys.modules["services"] = services
+        _services_spec.loader.exec_module(services)
+    else:
+        import services
 
 import auth
 import citizen

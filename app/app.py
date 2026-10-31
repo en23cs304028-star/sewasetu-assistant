@@ -125,8 +125,8 @@ ACTIVE_STATUSES = ("PENDING", "APPROVED", "DEEMED_APPROVED")
 SMS_GATEWAY_URL = os.environ.get("SMS_GATEWAY_URL") or config.get("app", "sms_gateway_url")
 OTP_VALIDITY_SECONDS = config.getint("app", "otp_validity_seconds")
 UPLOAD_DIR = config.get("app", "upload_dir")
-SCHEME_DEADLINE = datetime.strptime(config.get("pension", "scheme_deadline"),
-                                    "%Y-%m-%d %H:%M")
+SCHEME_DEADLINE_RAW = os.environ.get("SCHEME_DEADLINE", "").strip() or config.get("pension", "scheme_deadline")
+SCHEME_DEADLINE = datetime.strptime(SCHEME_DEADLINE_RAW, "%Y-%m-%d %H:%M")
 MIN_AGE = config.getint("pension", "min_age")
 SLA_DAYS = config.getint("pension", "sla_days")
 
@@ -163,7 +163,9 @@ def send_sms(mobile, text):
 
 
 def deadline_remaining():
-    delta = SCHEME_DEADLINE - now_ist()
+    raw_deadline = os.environ.get("SCHEME_DEADLINE", "").strip() or config.get("pension", "scheme_deadline")
+    deadline = datetime.strptime(raw_deadline, "%Y-%m-%d %H:%M")
+    delta = deadline - now_ist()
     if delta.total_seconds() <= 0:
         return None
     return int(delta.total_seconds() // 3600)

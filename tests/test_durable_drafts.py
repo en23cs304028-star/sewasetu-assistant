@@ -42,6 +42,7 @@ os.environ.setdefault("PGDATABASE", "sewasetu")
 os.environ.setdefault("PGUSER", "sewasetu")
 os.environ.setdefault("PGPASSWORD", "sewasetu123")
 os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
+os.environ.setdefault("SCHEME_DEADLINE", "2026-12-31 23:59")
 
 import services
 import auth
@@ -365,6 +366,7 @@ class TestDurableDraftsPostgres(unittest.TestCase):
         env["ADMIN_PASSWORD"] = "TestAdminPassword123!"
         env["MCP_PORT"] = str(port)
         env["PUBLIC_BASE_URL"] = self.issuer
+        env["SCHEME_DEADLINE"] = os.environ.get("SCHEME_DEADLINE", "2026-12-31 23:59")
         return env
 
     def test_08_restart_durability(self):

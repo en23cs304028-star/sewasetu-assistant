@@ -17,6 +17,10 @@ import services
 
 class TestServices(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("SCHEME_DEADLINE", "2026-12-31 23:59")
+
     def setUp(self):
         self.valid_data = {
             "applicant_name": "Sundari Bai",

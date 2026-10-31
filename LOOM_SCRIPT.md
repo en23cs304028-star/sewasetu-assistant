@@ -48,8 +48,8 @@
 - **Spoken Audio:**
   > "Here is our live evaluation dashboard at `/eval-dashboard`.
   > We maintain complete engineering honesty with a two-tier evaluation framework:
-  > Tier 1 executes 14 deterministic protocol and database boundary assertions—verifying schema rules, state transitions, prompt injection isolation, and kiosk session logouts with a 100% pass rate.
-  > Tier 2 integrates our headless Claude Code harness using Haiku with a 10-turn cap, testing multi-turn conversational agents over the real HTTP endpoint."
+  > Tier 1 executes 14 scripted persona scenarios against a mocked database (deterministic protocol and database assertions)—verifying schema rules, state transitions, prompt injection isolation, and kiosk session logouts with a 100% pass rate.
+  > Tier 2 integrates our headless Claude Code harness using Haiku with a 10-turn cap, testing multi-turn conversational agents over the real HTTP endpoint (currently pending API credentials)."
 
 ---
 

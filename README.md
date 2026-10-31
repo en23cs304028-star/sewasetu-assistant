@@ -205,10 +205,10 @@ docker compose exec app python scripts/retention_cleanup.py
 ```bash
 python3 -m unittest discover tests
 ```
-*Executes all 168 tests spanning domain logic, wire HTTP JSON-RPC POST, multi-process race conditions, and red-team penetration suites (Threats A through H). Pass rate: 100% OK.*
+*Executes all 168 script-generated tests spanning domain logic, wire HTTP JSON-RPC POST, multi-process race conditions, and red-team penetration suites (Threats A through H). Pass rate: 100% OK.*
 
 ### Persona Evaluation Harness (14 Personas)
 ```bash
 python3 evals/runner.py
 ```
-*Executes 14 citizen, officer, and integration personas asserting exact database states, boundary ages, prompt injection refusals, and kiosk session revocations. Pass rate: 14/14 (100.0%).*
+*Executes 14 scripted persona scenarios against a mocked database (Tier 1 deterministic rule-engine checks), verifying schema rules, boundary ages, prompt injection refusals, and kiosk session revocations. Pass rate: 14/14 (100.0%). (Tier 2 model-driven evaluations require headless LLM credentials and remain pending).*

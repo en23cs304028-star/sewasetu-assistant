@@ -191,7 +191,7 @@ def get_scheme_info(cfg=None):
         cfg = load_config()
     min_age = cfg.getint("pension", "min_age", fallback=60)
     sla_days = cfg.getint("pension", "sla_days", fallback=15)
-    raw_deadline = cfg.get("pension", "scheme_deadline", fallback="2026-10-31 23:59")
+    raw_deadline = os.environ.get("SCHEME_DEADLINE", "").strip() or cfg.get("pension", "scheme_deadline", fallback="2026-10-31 23:59")
     deadline = datetime.strptime(raw_deadline, "%Y-%m-%d %H:%M")
     delta = deadline - now_ist()
     hours_left = int(delta.total_seconds() // 3600) if delta.total_seconds() > 0 else 0
@@ -217,8 +217,8 @@ def validate_application(data, doc_path, cfg=None):
     if cfg is None:
         cfg = load_config()
     min_age = cfg.getint("pension", "min_age", fallback=60)
-    deadline = datetime.strptime(cfg.get("pension", "scheme_deadline", fallback="2026-10-31 23:59"),
-                                 "%Y-%m-%d %H:%M")
+    raw_deadline = os.environ.get("SCHEME_DEADLINE", "").strip() or cfg.get("pension", "scheme_deadline", fallback="2026-10-31 23:59")
+    deadline = datetime.strptime(raw_deadline, "%Y-%m-%d %H:%M")
     errors = []
     cleaned = {
         "applicant_name": sanitize(data.get("applicant_name")),
