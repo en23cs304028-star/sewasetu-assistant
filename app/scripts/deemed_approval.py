@@ -18,6 +18,10 @@ import psycopg2
 import requests
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+import services
 
 config = configparser.ConfigParser()
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "app.ini")
@@ -29,13 +33,7 @@ SMS_GATEWAY_URL = config.get("app", "sms_gateway_url")
 
 
 def main():
-    conn = psycopg2.connect(
-        host=config.get("database", "host"),
-        port=config.get("database", "port"),
-        dbname=config.get("database", "name"),
-        user=config.get("database", "user"),
-        password=config.get("database", "password"),
-    )
+    conn = services.get_db(config)
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(days=SLA_DAYS)
     cur.execute(

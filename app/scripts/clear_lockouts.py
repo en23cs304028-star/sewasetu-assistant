@@ -28,18 +28,20 @@ os.environ.setdefault("PGPASSWORD", "sewasetu123")
 import services
 
 
-def clear_lockouts(ip=None, username=None):
+def clear_lockouts(ip=None, username=None, all_limits=False):
     conn = services.get_db()
     cur = conn.cursor()
     count = 0
 
-    if ip and username:
+    if all_limits:
+        cur.execute("DELETE FROM rate_limits")
+        count = cur.rowcount
+    elif ip and username:
         key = f"officer_lockout:{ip}:{username.lower()}"
         cur.execute("DELETE FROM rate_limits WHERE key = %s", (key,))
         count = cur.rowcount
     elif ip:
-        pattern = f"officer_lockout:{ip}:%"
-        cur.execute("DELETE FROM rate_limits WHERE key LIKE %s", (pattern,))
+        cur.execute("DELETE FROM rate_limits WHERE key LIKE %s OR key = %s", (f"officer_lockout:{ip}:%", f"dcr_ip:{ip}"))
         count = cur.rowcount
     elif username:
         pattern = f"%:{username.lower()}"
@@ -57,13 +59,13 @@ def clear_lockouts(ip=None, username=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Clear officer login lockouts from PostgreSQL.")
-    parser.add_argument("--ip", help="Clear lockouts for a specific IP address")
+    parser = argparse.ArgumentParser(description="Clear officer login lockouts and rate limits from PostgreSQL.")
+    parser.add_argument("--ip", help="Clear lockouts and limits for a specific IP address")
     parser.add_argument("--user", help="Clear lockouts for a specific username")
-    parser.add_argument("--all", action="store_true", help="Clear all officer lockouts and delay counters")
+    parser.add_argument("--all", action="store_true", help="Clear all rate limits and lockouts")
 
     args = parser.parse_args()
-    deleted = clear_lockouts(ip=args.ip, username=args.user)
+    deleted = clear_lockouts(ip=args.ip, username=args.user, all_limits=args.all)
     print(f"Cleared {deleted} lockout records.")
 
 

@@ -40,6 +40,22 @@ os.environ.setdefault("SMS_GATEWAY_URL", "http://127.0.0.1:8025")
 from mcp.client.session import ClientSession
 import mcp.client.streamable_http as mcp_sh
 
+INSECURE_TLS = "--insecure" in sys.argv or os.environ.get("INSECURE_TLS", "").lower() in ("1", "true", "yes")
+if INSECURE_TLS:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def get_mcp_http_client(headers=None):
+    """Returns official MCP HTTP client, supporting explicit opt-in insecure TLS for self-signed certificates."""
+    if INSECURE_TLS:
+        return mcp_sh.httpx2.AsyncClient(
+            headers=headers,
+            verify=False,
+            timeout=mcp_sh.httpx2.Timeout(30.0, read=300.0)
+        )
+    return mcp_sh.create_mcp_http_client(headers=headers)
+
 
 def get_base_url():
     """Determine base URL from CLI argument, environment variable, or default."""
@@ -116,7 +132,7 @@ def start_services(base_portal, mcp_base, sms_gw_url):
 
     # Check if SMS gateway is already running
     try:
-        requests.get(f"{sms_gw_url}/api/messages", timeout=0.5)
+        requests.get(f"{sms_gw_url}/api/messages", timeout=0.5, verify=not INSECURE_TLS)
     except Exception:
         smsgw_app.DELAY_MIN = 0
         smsgw_app.DELAY_MAX = 0
@@ -129,7 +145,7 @@ def start_services(base_portal, mcp_base, sms_gw_url):
 
     # Check if Portal app is already running
     try:
-        requests.get(f"{base_portal}/", timeout=0.5)
+        requests.get(f"{base_portal}/", timeout=0.5, verify=not INSECURE_TLS)
     except Exception:
         p_portal = urlparse(base_portal).port or 8000
         t_portal = threading.Thread(
@@ -140,7 +156,7 @@ def start_services(base_portal, mcp_base, sms_gw_url):
 
     # Check if MCP server is already running
     try:
-        requests.get(f"{mcp_base}/.well-known/oauth-protected-resource", timeout=0.5)
+        requests.get(f"{mcp_base}/.well-known/oauth-protected-resource", timeout=0.5, verify=not INSECURE_TLS)
     except Exception:
         p_mcp = urlparse(mcp_base).port or 8010
         t_mcp = threading.Thread(
@@ -152,23 +168,36 @@ def start_services(base_portal, mcp_base, sms_gw_url):
     time.sleep(1.0)
 
 
+_CLIENT_CACHE = {}
+
+
+def get_or_register_client(sess, base_portal):
+    redirect_uri = "http://localhost:8899/callback"
+    cache_key = (base_portal, redirect_uri)
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
+
+    reg_resp = sess.post(f"{base_portal}/oauth/register", json={
+        "client_name": "Test SDK Client",
+        "redirect_uris": [redirect_uri]
+    }, timeout=5)
+    if reg_resp.status_code != 201:
+        raise RuntimeError(f"Client registration failed ({reg_resp.status_code}): {reg_resp.text}")
+    reg_data = reg_resp.json()
+    _CLIENT_CACHE[cache_key] = (reg_data["client_id"], redirect_uri)
+    return _CLIENT_CACHE[cache_key]
+
+
 def perform_oauth_code_pkce(base_portal, mcp_base, role="citizen", mobile="9990001001",
                             username=None, password=None, sms_gw_url=None):
     """Executes OAuth 2.1 Authorization Code grant with PKCE and dynamic client registration."""
     username = username or os.environ.get("ADMIN_USERNAME", "admin")
     mcp_res_url = f"{base_portal}/mcp/{role}"
     sess = requests.Session()
+    sess.verify = not INSECURE_TLS
 
-    # 1. Dynamic Client Registration
-    reg_resp = sess.post(f"{base_portal}/oauth/register", json={
-        "client_name": f"Test {role.capitalize()} Client",
-        "redirect_uris": ["http://localhost:8899/callback"]
-    }, timeout=5)
-    if reg_resp.status_code != 201:
-        raise RuntimeError(f"Client registration failed ({reg_resp.status_code}): {reg_resp.text}")
-    reg_data = reg_resp.json()
-    client_id = reg_data["client_id"]
-    redirect_uri = reg_data["redirect_uris"][0]
+    # 1. Dynamic Client Registration (reusing registered client if available)
+    client_id, redirect_uri = get_or_register_client(sess, base_portal)
 
     # 2. PKCE code challenge
     verifier = secrets.token_urlsafe(40)
@@ -262,7 +291,7 @@ def perform_oauth_code_pkce(base_portal, mcp_base, role="citizen", mobile="99900
 async def run_mcp_flow(endpoint, token, tool_name, tool_args):
     """Connects to MCP endpoint using the official Python SDK client and invokes tool."""
     headers = {"Authorization": f"Bearer {token}"}
-    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+    async with get_mcp_http_client(headers=headers) as http_client:
         async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 init_res = await session.initialize()
@@ -271,18 +300,20 @@ async def run_mcp_flow(endpoint, token, tool_name, tool_args):
                 return init_res, tools_res, call_res
 
 
-def check_auth_responses(base_portal, mcp_base, sms_gw_url):
+def check_auth_responses(base_portal, mcp_base, sms_gw_url, citizen_token=None):
     """Verify HTTP 401 unauthenticated and HTTP 403 insufficient scope behavior."""
     # 1. Unauthenticated request to /mcp/citizen -> 401
-    r_unauth = requests.post(f"{mcp_base}/mcp/citizen", json={
+    r_unauth = requests.post(f"{mcp_base}/mcp/citizen", verify=not INSECURE_TLS, json={
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}
     }, timeout=5)
 
     # 2. Citizen token to /mcp/officer -> 403
-    citizen_token = perform_oauth_code_pkce(base_portal, mcp_base, role="citizen",
-                                           mobile="9990001001", sms_gw_url=sms_gw_url)
-    r_wrong_role = requests.post(f"{mcp_base}/mcp/officer", headers={"Authorization": f"Bearer {citizen_token}"}, json={
+    if not citizen_token:
+        fresh_mobile = f"9990{secrets.randbelow(1000000):06d}"
+        citizen_token = perform_oauth_code_pkce(base_portal, mcp_base, role="citizen",
+                                               mobile=fresh_mobile, sms_gw_url=sms_gw_url)
+    r_wrong_role = requests.post(f"{mcp_base}/mcp/officer", verify=not INSECURE_TLS, headers={"Authorization": f"Bearer {citizen_token}"}, json={
         "jsonrpc": "2.0", "id": 2, "method": "initialize",
         "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}
     }, timeout=5)
@@ -303,7 +334,7 @@ def check_rfc9728_discovery(base_portal, mcp_base):
 
     results = {}
     for url in endpoints:
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=5, verify=not INSECURE_TLS)
         results[url] = {
             "status": resp.status_code,
             "data": resp.json() if resp.status_code == 200 else resp.text
@@ -329,7 +360,7 @@ async def run_citizen_journey(mcp_base, citizen_token):
 
     endpoint = f"{mcp_base}/mcp/citizen"
     headers = {"Authorization": f"Bearer {citizen_token}"}
-    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+    async with get_mcp_http_client(headers=headers) as http_client:
         async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -363,7 +394,7 @@ async def run_p0_2(base_portal, mcp_base, officer_token):
     endpoint = f"{mcp_base}/mcp/officer"
     headers = {"Authorization": f"Bearer {officer_token}"}
 
-    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+    async with get_mcp_http_client(headers=headers) as http_client:
         async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 # 1. initialize
@@ -425,7 +456,7 @@ async def submit_citizen_application(base_portal, mcp_base, sms_gw_url, mobile, 
     endpoint = f"{mcp_base}/mcp/citizen"
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+    async with get_mcp_http_client(headers=headers) as http_client:
         async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -461,7 +492,7 @@ async def check_citizen_status(mcp_base, citizen_token):
     """Queries get_my_status for the authenticated citizen."""
     endpoint = f"{mcp_base}/mcp/citizen"
     headers = {"Authorization": f"Bearer {citizen_token}"}
-    async with mcp_sh.create_mcp_http_client(headers=headers) as http_client:
+    async with get_mcp_http_client(headers=headers) as http_client:
         async with mcp_sh.streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -527,7 +558,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
     headers_officer = {"Authorization": f"Bearer {officer_token}"}
     endpoint_officer = f"{mcp_base}/mcp/officer"
 
-    async with mcp_sh.create_mcp_http_client(headers=headers_officer) as http_client:
+    async with get_mcp_http_client(headers=headers_officer) as http_client:
         async with mcp_sh.streamable_http_client(endpoint_officer, http_client=http_client) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -669,7 +700,7 @@ async def main():
     base_portal = get_base_url()
     os.environ["PUBLIC_BASE_URL"] = base_portal
     admin_username, admin_password = get_admin_credentials(base_portal)
-    is_local = is_local_target(base_portal)
+    is_local = is_local_target(base_portal) and not base_portal.startswith("https://")
 
     if is_local:
         mcp_base = os.environ.get("MCP_BASE_URL", "http://127.0.0.1:8010")
@@ -678,8 +709,8 @@ async def main():
         start_services(base_portal, mcp_base, sms_gw_url)
     else:
         mcp_base = os.environ.get("MCP_BASE_URL", base_portal)
-        sms_gw_url = f"{base_portal}/__gateway"
-        print(f"=== 1. Targeting Remote Deployed Server: {base_portal} ===")
+        sms_gw_url = os.environ.get("SMS_GATEWAY_URL", f"{base_portal}/__gateway")
+        print(f"=== 1. Targeting Server: {base_portal} ===")
 
     print(f"Base Portal: {base_portal}")
     print(f"MCP Base:    {mcp_base}")
@@ -757,7 +788,7 @@ async def main():
 
     # 2. Citizen OAuth Flow
     print("\n=== 2. Citizen OAuth 2.1 Code + PKCE Flow ===")
-    citizen_mobile = "9990001001" if is_local else "9990005544"
+    citizen_mobile = f"9990{secrets.randbelow(1000000):06d}"
     citizen_token = perform_oauth_code_pkce(
         base_portal, mcp_base, role="citizen",
         mobile=citizen_mobile, sms_gw_url=sms_gw_url
@@ -817,7 +848,7 @@ async def main():
 
     # 6. Auth Edge Cases (401 and 403)
     print("\n=== 6. Auth Edge Cases (401 and 403) ===")
-    r_unauth, r_wrong_role, _ = check_auth_responses(base_portal, mcp_base, sms_gw_url)
+    r_unauth, r_wrong_role, _ = check_auth_responses(base_portal, mcp_base, sms_gw_url, citizen_token=citizen_token)
     print(f"Unauthenticated /mcp/citizen status: {r_unauth.status_code}")
     print(f"Unauthenticated WWW-Authenticate header: {r_unauth.headers.get('WWW-Authenticate')}")
     print(f"Citizen token on /mcp/officer status: {r_wrong_role.status_code}")
@@ -847,7 +878,7 @@ async def main():
 
     if officer_token:
         # Officer list_applications check
-        async with mcp_sh.create_mcp_http_client(headers={"Authorization": f"Bearer {officer_token}"}) as http_client:
+        async with get_mcp_http_client(headers={"Authorization": f"Bearer {officer_token}"}) as http_client:
             async with mcp_sh.streamable_http_client(f"{mcp_base}/mcp/officer", http_client=http_client) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -856,7 +887,7 @@ async def main():
 
     # 9. Eval Dashboard Verification
     print("\n=== 9. Eval Dashboard Verification ===")
-    r_dash = requests.get(f"{base_portal}/eval-dashboard", timeout=5)
+    r_dash = requests.get(f"{base_portal}/eval-dashboard", timeout=5, verify=not INSECURE_TLS)
     print(f"/eval-dashboard status: {r_dash.status_code}")
     print(f"Dashboard contains 'Persona Evaluation Dashboard': {'Persona Evaluation Dashboard' in r_dash.text}")
 
