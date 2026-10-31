@@ -16,6 +16,8 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 
@@ -68,6 +70,9 @@ def run_evals():
     results = []
     total_passed = 0
     start_time = time.time()
+    eval_now = datetime(2026, 10, 20, 12, 0)
+    now_patcher = patch.object(services, "now_ist", return_value=eval_now)
+    now_patcher.start()
 
     for p in personas:
         pid = p["id"]
@@ -404,6 +409,7 @@ def run_evals():
             "transcript": transcript,
             "what_changed_because_of_eval": CHANGES_LOG.get(pid, "Standardized validation behavior.")
         })
+    now_patcher.stop()
 
     import claude_harness
     claude_ready, claude_status_msg = claude_harness.check_claude_availability()

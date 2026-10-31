@@ -21,13 +21,18 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 
+import importlib.util
+if "services" in sys.modules:
+    services = sys.modules["services"]
+else:
+    _services_spec = importlib.util.spec_from_file_location("services", os.path.join(BASE_DIR, "app", "services.py"))
+    services = importlib.util.module_from_spec(_services_spec)
+    sys.modules["services"] = services
+    _services_spec.loader.exec_module(services)
+
 import auth
 import citizen
 import officer
-try:
-    import services
-except ImportError:
-    from app import services
 
 logger = logging.getLogger("sewasetu.mcp")
 
@@ -734,4 +739,4 @@ def mcp_officer():
 
 if __name__ == "__main__":
     port = int(os.environ.get("MCP_PORT", 8010))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, load_dotenv=False)

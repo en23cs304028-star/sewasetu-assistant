@@ -40,18 +40,16 @@ os.environ.setdefault("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 
-try:
-    import services
-except ImportError:
-    from app import services
+import importlib.util
+_services_spec = importlib.util.spec_from_file_location("services", os.path.join(BASE_DIR, "app", "services.py"))
+services = importlib.util.module_from_spec(_services_spec)
+sys.modules["services"] = services
+_services_spec.loader.exec_module(services)
 
-try:
-    import auth
-except ImportError:
-    import importlib.util
-    _auth_spec = importlib.util.spec_from_file_location("auth", os.path.join(BASE_DIR, "mcp", "auth.py"))
-    auth = importlib.util.module_from_spec(_auth_spec)
-    _auth_spec.loader.exec_module(auth)
+_auth_spec = importlib.util.spec_from_file_location("auth", os.path.join(BASE_DIR, "mcp", "auth.py"))
+auth = importlib.util.module_from_spec(_auth_spec)
+sys.modules["auth"] = auth
+_auth_spec.loader.exec_module(auth)
 
 # ---------------------------------------------------------------------------
 # Configuration & Credentials (safe reading only from env or gitignored .env)
@@ -122,7 +120,9 @@ def ensure_servers():
         try:
             requests.get("http://127.0.0.1:8000/.well-known/oauth-authorization-server", timeout=0.5)
         except Exception:
-            import app as portal_app
+            portal_spec = importlib.util.spec_from_file_location("portal_app", os.path.join(BASE_DIR, "app", "app.py"))
+            portal_app = importlib.util.module_from_spec(portal_spec)
+            portal_spec.loader.exec_module(portal_app)
             t_portal = threading.Thread(target=lambda: portal_app.app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False), daemon=True)
             t_portal.start()
 

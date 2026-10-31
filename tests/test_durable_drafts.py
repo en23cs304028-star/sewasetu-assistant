@@ -364,6 +364,7 @@ class TestDurableDraftsPostgres(unittest.TestCase):
         env["PGPASSWORD"] = os.environ.get("PGPASSWORD", "sewasetu123")
         env["ADMIN_PASSWORD"] = "TestAdminPassword123!"
         env["MCP_PORT"] = str(port)
+        env["PUBLIC_BASE_URL"] = self.issuer
         return env
 
     def test_08_restart_durability(self):

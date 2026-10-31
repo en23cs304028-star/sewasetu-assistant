@@ -26,6 +26,13 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 
+os.environ.setdefault("PGHOST", "localhost")
+os.environ.setdefault("PGPORT", "5433")
+os.environ.setdefault("PGDATABASE", "sewasetu")
+os.environ.setdefault("PGUSER", "sewasetu")
+os.environ.setdefault("PGPASSWORD", "sewasetu123")
+os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
+
 import server
 import auth
 from mcp.client.session import ClientSession
