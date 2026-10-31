@@ -24,6 +24,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp")))
 
+os.environ.setdefault("PGHOST", "localhost")
+os.environ.setdefault("PGPORT", "5433")
+os.environ.setdefault("PGDATABASE", "sewasetu")
+os.environ.setdefault("PGUSER", "sewasetu")
+os.environ.setdefault("PGPASSWORD", "sewasetu123")
+os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
+
 import server
 import auth
 import citizen
@@ -45,9 +52,15 @@ class TestMCPServers(unittest.TestCase):
         self.app = server.app.test_client()
         auth.JWT_PUBLIC_KEYS_OVERRIDE = self.keys_dict
         citizen.DRAFTS.clear()
+        self.p_rev = patch.object(auth, "is_token_revoked", return_value=False)
+        self.p_rate = patch.object(services, "check_rate_limit", return_value=(True, 0))
+        self.p_rev.start()
+        self.p_rate.start()
 
     def tearDown(self):
         auth.JWT_PUBLIC_KEYS_OVERRIDE = None
+        self.p_rev.stop()
+        self.p_rate.stop()
 
     def mint_token(self, subject, role, audience, exp_offset=1200):
         now = int(time.time())

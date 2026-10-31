@@ -143,7 +143,8 @@ def verify_token(token, audience):
 
 @oauth.get("/.well-known/oauth-authorization-server")
 def as_metadata():
-    return jsonify({
+    client_metadata_supported = os.environ.get("CLIENT_METADATA_FETCH", "true").lower() in ("true", "1", "yes")
+    meta = {
         "issuer": ISSUER,
         "authorization_endpoint": ISSUER + "/oauth/authorize",
         "token_endpoint": ISSUER + "/oauth/token",
@@ -157,9 +158,11 @@ def as_metadata():
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "authorization_response_iss_parameter_supported": True,
-        "client_id_metadata_document_supported": True,
         "service_documentation": ISSUER + "/about",
-    })
+    }
+    if client_metadata_supported:
+        meta["client_id_metadata_document_supported"] = True
+    return jsonify(meta)
 
 
 @oauth.get("/.well-known/jwks.json")
@@ -263,15 +266,20 @@ def _is_url_client(client_id):
 def _fetch_client_metadata(client_id):
     """
     Safely fetch RFC 7591 / OAuth 2.1 client metadata document with comprehensive SSRF protection:
+      - Configurable: respects CLIENT_METADATA_FETCH (default true)
       - HTTPS only
-      - Resolve DNS and block loopback, private, link-local, multicast, reserved, and IPv6 equivalents
+      - Resolve DNS once and block loopback, private, link-local, multicast, reserved, and IPv6 equivalents
       - Block Docker container service names
+      - Pinned-resolution adapter prevents DNS rebinding (no second DNS query)
       - Disallow redirects (allow_redirects=False)
       - 3-second timeout
       - 64 KB response body cap
       - application/json Content-Type only
       - No credentials forwarded
     """
+    if os.environ.get("CLIENT_METADATA_FETCH", "true").lower() not in ("true", "1", "yes"):
+        return None
+
     if not isinstance(client_id, str) or not client_id.startswith("https://"):
         return None
 
@@ -286,16 +294,75 @@ def _fetch_client_metadata(client_id):
             return None
         port = u.port or 443
 
-        # Resolve DNS and block loopback, private, link-local and IPv6 equivalents
+        # Resolve DNS once and block loopback, private, link-local and IPv6 equivalents
         addrinfo = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        validated_ips = []
         for _, _, _, _, sockaddr in addrinfo:
             ip = ipaddress.ip_address(sockaddr[0])
             if (ip.is_loopback or ip.is_private or ip.is_link_local or
                 ip.is_multicast or ip.is_reserved or ip.is_unspecified):
                 return None
+            validated_ips.append(str(ip))
+
+        if not validated_ips:
+            return None
+
+        pinned_ip = validated_ips[0]
+
+        # Pinned resolution adapter: connect directly to validated IP, send original Host header, verify TLS against hostname
+        from requests.adapters import HTTPAdapter
+        from urllib3.connection import HTTPSConnection
+        from urllib3.connectionpool import HTTPSConnectionPool
+        from urllib3.poolmanager import PoolManager
+        from urllib3.util.connection import create_connection
+
+        class PinnedHTTPSConnection(HTTPSConnection):
+            def __init__(self, *args, **kwargs):
+                self._pinned_ip = kwargs.pop("pinned_ip", None)
+                super().__init__(*args, **kwargs)
+
+            def _new_conn(self):
+                extra_kw = {}
+                if self.source_address:
+                    extra_kw["source_address"] = self.source_address
+                if self.socket_options:
+                    extra_kw["socket_options"] = self.socket_options
+                return create_connection(
+                    (self._pinned_ip or self.host, self.port),
+                    self.timeout,
+                    **extra_kw
+                )
+
+        class PinnedHTTPSConnectionPool(HTTPSConnectionPool):
+            ConnectionCls = PinnedHTTPSConnection
+            def __init__(self, *args, **kwargs):
+                self._pinned_ip = kwargs.pop("pinned_ip", None)
+                super().__init__(*args, **kwargs)
+                self.conn_kw["pinned_ip"] = self._pinned_ip
+
+        class PinnedPoolManager(PoolManager):
+            def __init__(self, pinned_ip, *args, **kwargs):
+                self._pinned_ip = pinned_ip
+                super().__init__(*args, **kwargs)
+                self.pool_classes_by_scheme["https"] = lambda host, port, **kw: PinnedHTTPSConnectionPool(
+                    host, port, pinned_ip=self._pinned_ip, **kw
+                )
+
+        class PinnedIPAdapter(HTTPAdapter):
+            def __init__(self, pinned_ip, *args, **kwargs):
+                self.pinned_ip = pinned_ip
+                super().__init__(*args, **kwargs)
+
+            def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+                self.poolmanager = PinnedPoolManager(
+                    self.pinned_ip, num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs
+                )
+
+        session = http if hasattr(http, "mount") else requests.Session()
+        session.mount("https://", PinnedIPAdapter(pinned_ip))
 
         # 3-second timeout, no redirects, clean headers (no credentials)
-        resp = http.get(
+        resp = session.get(
             client_id,
             timeout=3,
             allow_redirects=False,
@@ -334,6 +401,9 @@ def _fetch_client_metadata(client_id):
 
 def load_client(client_id):
     """Registered client, or a client described by its metadata document URL."""
+    if os.environ.get("CLIENT_METADATA_FETCH", "true").lower() not in ("true", "1", "yes") and _is_url_client(client_id):
+        return None
+
     conn = portal.get_db()
     cur = conn.cursor()
     cur.execute("SELECT client_id, client_name, redirect_uris, secret_hash, kind, fetched_at "
@@ -364,7 +434,7 @@ def load_client(client_id):
 
 @oauth.post("/oauth/register")
 def register():
-    ip = request.remote_addr or "unknown"
+    ip = services.get_client_ip(request)
     conn = portal.get_db()
 
     # Per-IP rate limit: max 10 dynamic client registrations per hour
@@ -532,10 +602,7 @@ def authorize():
 
 
 def _get_client_ip():
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr or "127.0.0.1"
+    return services.get_client_ip(request)
 
 
 @oauth.route("/oauth/login", methods=["GET", "POST"])
@@ -589,7 +656,7 @@ def login():
                                                     details={"reason": "otp_expired_or_invalidated"})
                         conn.close()
                         flash("Invalid or expired OTP.")
-                    elif secrets.compare_digest(db_code, code):
+                    elif services.secure_compare(db_code, code):
                         cur.execute("UPDATE otps SET used_at = %s WHERE id = %s", (datetime.now(), otp_id))
                         conn.commit()
                         cur.close(); conn.close()
@@ -628,35 +695,40 @@ def login():
         else:
             username = (request.form.get("username") or "").strip()
             password = request.form.get("password") or ""
-            ip_key = f"officer_fail_ip:{ip}"
-            user_key = f"officer_fail_user:{username.lower()}"
+            pair_key = f"officer_lockout:{ip}:{username.lower()}"
+            user_delay_key = f"officer_delay_user:{username.lower()}"
 
-            ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
-            user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
-            if ip_limited or user_limited:
+            # Hard lockout keyed strictly on (IP, username): 5 failures -> 429
+            pair_limited, pair_retry = services.is_rate_limited(conn, pair_key, 5, 900)
+            if pair_limited:
                 services.log_security_event(conn, "lockout", subject=f"officer:{username}", ip=ip,
                                             user_agent=request.user_agent.string,
-                                            details={"reason": "officer_lockout_exceeded"})
+                                            details={"reason": "officer_lockout_exceeded", "pair_key": pair_key})
                 conn.close()
-                retry_after = max(ip_retry, user_retry)
                 resp = render_template("oauth_login.html", rid=rid, role=role,
                                        client_name=req["params"]["client_name"],
                                        pending_mobile=req["pending_mobile"],
                                        error="Too many failed login attempts. Please try again later.")
-                return resp, 429, {"Retry-After": str(max(1, retry_after))}
+                return resp, 429, {"Retry-After": str(max(1, pair_retry))}
 
-            valid_user = secrets.compare_digest(username, portal.ADMIN_USERNAME)
-            valid_pwd = bool(portal.ADMIN_PASSWORD and secrets.compare_digest(password, portal.ADMIN_PASSWORD))
+            # Per-username delay: adds exponential delay, never hard-locks
+            user_fails = services.get_rate_limit_count(conn, user_delay_key, 900)
+            if user_fails >= 3:
+                delay = min(900, 2 ** (user_fails - 2))
+                time.sleep(min(delay, 2.0))
+
+            valid_user = services.secure_compare(username, portal.ADMIN_USERNAME)
+            valid_pwd = bool(portal.ADMIN_PASSWORD and services.secure_compare(password, portal.ADMIN_PASSWORD))
 
             if valid_user and valid_pwd:
-                services.clear_rate_limit(conn, ip_key)
-                services.clear_rate_limit(conn, user_key)
+                services.clear_rate_limit(conn, pair_key)
+                services.clear_rate_limit(conn, user_delay_key)
                 conn.close()
                 _update_request(rid, subject="officer:" + portal.ADMIN_USERNAME)
                 return redirect(url_for("oauth.consent", rid=rid))
             else:
-                services.record_rate_limit_failure(conn, ip_key, 900)
-                services.record_rate_limit_failure(conn, user_key, 900)
+                services.record_rate_limit_failure(conn, pair_key, 900)
+                services.record_rate_limit_failure(conn, user_delay_key, 900)
                 services.log_security_event(conn, "login_failure", subject=f"officer:{username}", ip=ip,
                                             user_agent=request.user_agent.string,
                                             details={"reason": "invalid_credentials"})
@@ -712,7 +784,7 @@ def _token_error(error, desc, status=400):
 def _check_client_auth(client, form):
     if client["secret_hash"]:
         given = form.get("client_secret", "")
-        return secrets.compare_digest(hashlib.sha256(given.encode()).hexdigest(), client["secret_hash"])
+        return services.secure_compare(hashlib.sha256(given.encode()).hexdigest(), client["secret_hash"])
     return True
 
 

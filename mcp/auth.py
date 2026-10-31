@@ -60,14 +60,12 @@ JWT_PUBLIC_KEYS_OVERRIDE = None
 
 
 def is_token_revoked(jti, subject=None, iat=None):
-    """Check whether a token or session has been revoked in Postgres."""
+    """Check whether a token or session has been revoked in Postgres. Fails closed on DB error."""
     if not jti:
         return True
+    conn = None
     try:
         conn = services.get_db()
-        # If test suite patched services.get_db with a mock connection, do not deplete mock cursor
-        if type(conn).__module__.startswith("unittest.mock"):
-            return False
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM oauth_revocations WHERE jti = %s", (jti,))
         row = cur.fetchone()
@@ -90,9 +88,14 @@ def is_token_revoked(jti, subject=None, iat=None):
                     return True
         cur.close()
         conn.close()
-    except Exception:
-        pass
-    return False
+        return False
+    except Exception as e:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        raise RuntimeError(f"Database error checking token revocation: {e}")
 
 
 def verify_token(token, expected_resource, expected_role=None, public_keys=None):
@@ -159,9 +162,12 @@ def verify_token(token, expected_resource, expected_role=None, public_keys=None)
         if int(time.time()) > claims["session_ends"]:
             return False, "session_ended: absolute session lifetime elapsed"
 
-    # Revocation check against Postgres
-    if is_token_revoked(claims.get("jti"), subject=claims.get("sub"), iat=claims.get("iat")):
-        return False, "token_revoked"
+    # Revocation check against Postgres (fails closed on DB error)
+    try:
+        if is_token_revoked(claims.get("jti"), subject=claims.get("sub"), iat=claims.get("iat")):
+            return False, "token_revoked"
+    except Exception as e:
+        return False, "auth_service_unavailable: %s" % e
 
     return True, claims
 

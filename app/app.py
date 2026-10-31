@@ -10,6 +10,7 @@ Maintained in-house since 02/2026.
 import os
 import io
 import re
+import time
 import random
 import secrets
 import hashlib
@@ -26,11 +27,18 @@ def now_ist():
 
 import requests
 import psycopg2
+import logging
 from flask import (Flask, request, session, redirect, url_for, render_template,
                    flash, send_file, abort)
 from fpdf import FPDF
 
+logger = logging.getLogger("sewasetu.portal")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+import sys
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+import services
 
 config = configparser.ConfigParser()
 config.read(os.path.join(BASE_DIR, "config", "app.ini"))
@@ -51,8 +59,17 @@ DEFAULT_PASSWORDS = {"admin", "password", "sewasetu", "sewasetu123", "default", 
 if is_production:
     if not ADMIN_PASSWORD or ADMIN_PASSWORD.lower() in DEFAULT_PASSWORDS or len(ADMIN_PASSWORD) < 16:
         raise RuntimeError("In production, ADMIN_PASSWORD must be set, not a default password, and at least 16 characters long.")
+    db_pass = os.environ.get("PGPASSWORD") or config.get("database", "password", fallback="sewasetu123")
+    if db_pass == "sewasetu123":
+        logger.warning("SECURITY WARNING: Using default database password 'sewasetu123' in production environment!")
 elif not ADMIN_PASSWORD:
     raise RuntimeError("ADMIN_PASSWORD environment variable must be set. The application will not start without it.")
+
+# Ensure schema and security tables are created at startup
+try:
+    services.ensure_all_tables()
+except Exception as e:
+    logger.warning("Could not run startup table migrations (will retry on DB connect): %s", e)
 
 def get_csrf_token():
     if "csrf_token" not in session:
@@ -80,7 +97,7 @@ def csrf_protect():
             return
         submitted = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
         sess_token = session.get("csrf_token")
-        if not submitted or not sess_token or not secrets.compare_digest(submitted, sess_token):
+        if not submitted or not sess_token or not services.secure_compare(submitted, sess_token):
             try:
                 conn_log = get_db()
                 services.log_security_event(conn_log, "csrf_failure", ip=get_client_ip(request),
@@ -91,10 +108,7 @@ def csrf_protect():
             abort(400, description="CSRF token missing or invalid.")
 
 def get_client_ip(req):
-    xff = req.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return req.remote_addr or "127.0.0.1"
+    return services.get_client_ip(req)
 
 # An applicant may hold at most one application in these states at a time.
 # WITHDRAWN and REJECTED applications do not block a fresh application.
@@ -285,7 +299,7 @@ def verify():
             flash("OTP expired or invalidated. Please request a new OTP.")
             return redirect(url_for("apply"))
 
-        if secrets.compare_digest(db_code, code):
+        if services.secure_compare(db_code, code):
             cur.execute("UPDATE otps SET used_at = %s WHERE id = %s", (datetime.now(), otp_id))
             conn.commit()
             cur.close(); conn.close()
@@ -572,34 +586,39 @@ def admin_login():
         pwd = request.form.get("password") or ""
         conn = get_db()
 
-        ip_key = f"officer_fail_ip:{ip}"
-        user_key = f"officer_fail_user:{username.lower()}"
+        pair_key = f"officer_lockout:{ip}:{username.lower()}"
+        user_delay_key = f"officer_delay_user:{username.lower()}"
 
-        ip_limited, ip_retry = services.is_rate_limited(conn, ip_key, 5, 900)
-        user_limited, user_retry = services.is_rate_limited(conn, user_key, 5, 900)
-        if ip_limited or user_limited:
+        # Hard lockout keyed strictly on (IP, username): 5 failures -> 429
+        pair_limited, pair_retry = services.is_rate_limited(conn, pair_key, 5, 900)
+        if pair_limited:
             services.log_security_event(conn, "lockout", subject=f"officer:{username}", ip=ip,
                                         user_agent=request.user_agent.string,
-                                        details={"reason": "officer_lockout_exceeded"})
+                                        details={"reason": "officer_lockout_exceeded", "pair_key": pair_key})
             conn.close()
-            retry_after = max(ip_retry, user_retry)
             resp = render_template("admin_login.html", error="Too many failed login attempts. Please try again later.")
-            return resp, 429, {"Retry-After": str(max(1, retry_after))}
+            return resp, 429, {"Retry-After": str(max(1, pair_retry))}
 
-        valid_user = secrets.compare_digest(username, ADMIN_USERNAME)
-        valid_pwd = bool(ADMIN_PASSWORD and secrets.compare_digest(pwd, ADMIN_PASSWORD))
+        # Per-username delay: adds exponential delay, never hard-locks
+        user_fails = services.get_rate_limit_count(conn, user_delay_key, 900)
+        if user_fails >= 3:
+            delay = min(900, 2 ** (user_fails - 2))
+            time.sleep(min(delay, 2.0))
+
+        valid_user = services.secure_compare(username, ADMIN_USERNAME)
+        valid_pwd = bool(ADMIN_PASSWORD and services.secure_compare(pwd, ADMIN_PASSWORD))
 
         if valid_user and valid_pwd:
-            services.clear_rate_limit(conn, ip_key)
-            services.clear_rate_limit(conn, user_key)
+            services.clear_rate_limit(conn, pair_key)
+            services.clear_rate_limit(conn, user_delay_key)
             conn.close()
             session["logged_in"] = True
             session["admin"] = True
             session["admin_user"] = ADMIN_USERNAME
             return redirect(url_for("admin_dashboard"))
         else:
-            services.record_rate_limit_failure(conn, ip_key, 900)
-            services.record_rate_limit_failure(conn, user_key, 900)
+            services.record_rate_limit_failure(conn, pair_key, 900)
+            services.record_rate_limit_failure(conn, user_delay_key, 900)
             services.log_security_event(conn, "login_failure", subject=f"officer:{username}", ip=ip,
                                         user_agent=request.user_agent.string,
                                         details={"reason": "invalid_credentials"})

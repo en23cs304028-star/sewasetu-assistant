@@ -12,6 +12,7 @@ import hmac
 import json
 import secrets
 import logging
+import ipaddress
 import configparser
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -55,6 +56,75 @@ def get_db(cfg=None):
         user=user,
         password=password,
     )
+
+
+DEFAULT_TRUSTED_PROXY_CIDRS = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,::1/128"
+
+
+def get_client_ip(req):
+    """
+    Obtain client IP address with proxy spoofing protection:
+    - Uses X-Forwarded-For ONLY when direct peer is inside trusted proxy CIDRs (TRUSTED_PROXY_CIDRS).
+    - Takes right-most untrusted forwarded IP to defeat spoofed leading headers.
+    - If direct peer is not trusted, ignores X-Forwarded-For and returns remote_addr.
+    """
+    peer_ip_str = getattr(req, "remote_addr", None) or "127.0.0.1"
+    trusted_cidrs_str = os.environ.get("TRUSTED_PROXY_CIDRS", DEFAULT_TRUSTED_PROXY_CIDRS)
+    trusted_nets = []
+    for cidr in trusted_cidrs_str.split(","):
+        cidr = cidr.strip()
+        if cidr:
+            try:
+                trusted_nets.append(ipaddress.ip_network(cidr))
+            except ValueError:
+                pass
+
+    try:
+        peer_ip = ipaddress.ip_address(peer_ip_str)
+        is_trusted = any(peer_ip in net for net in trusted_nets)
+    except ValueError:
+        is_trusted = False
+
+    if not is_trusted:
+        return peer_ip_str
+
+    # Direct peer is trusted proxy: check X-Forwarded-For
+    headers = getattr(req, "headers", {})
+    xff = headers.get("X-Forwarded-For") if hasattr(headers, "get") else None
+    if not xff:
+        return peer_ip_str
+
+    entries = [ip.strip() for ip in xff.split(",") if ip.strip()]
+    if not entries:
+        return peer_ip_str
+
+    # Return right-most untrusted entry, or right-most entry if all are untrusted/trusted
+    for entry in reversed(entries):
+        try:
+            parsed = ipaddress.ip_address(entry)
+            if not any(parsed in net for net in trusted_nets):
+                return entry
+        except ValueError:
+            continue
+
+    return entries[-1]
+
+
+def secure_compare(val1, val2) -> bool:
+    """
+    Safely compare two strings or byte sequences in constant time.
+    Encodes both to UTF-8 bytes to prevent type errors, handles None,
+    empty strings, and arbitrary lengths (including non-ASCII and large strings)
+    without raising exceptions.
+    """
+    if val1 is None or val2 is None:
+        return False
+    try:
+        b1 = val1.encode("utf-8") if isinstance(val1, str) else bytes(val1)
+        b2 = val2.encode("utf-8") if isinstance(val2, str) else bytes(val2)
+        return secrets.compare_digest(b1, b2)
+    except Exception:
+        return False
 
 
 def sanitize(value, maxlen=100):
@@ -312,21 +382,20 @@ def ensure_security_tables(conn):
         CREATE INDEX IF NOT EXISTS idx_sec_audit_event ON security_audit_log (event_type);
         CREATE INDEX IF NOT EXISTS idx_sec_audit_created ON security_audit_log (created_at);
 
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'otps' AND column_name = 'attempts'
-            ) THEN
-                ALTER TABLE otps ADD COLUMN attempts INT DEFAULT 0;
-            END IF;
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'otps' AND column_name = 'used_at'
-            ) THEN
-                ALTER TABLE otps ADD COLUMN used_at TIMESTAMP;
-            END IF;
-        END $$;
+        CREATE TABLE IF NOT EXISTS confirmation_tokens (
+            token_hash      VARCHAR(64) PRIMARY KEY,
+            application_id  INTEGER NOT NULL,
+            decision        VARCHAR(20) NOT NULL,
+            officer_subject VARCHAR(80) NOT NULL,
+            reason          VARCHAR(500),
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at      TIMESTAMPTZ NOT NULL,
+            used_at         TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_conf_tokens_app ON confirmation_tokens (application_id);
+
+        ALTER TABLE otps ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;
+        ALTER TABLE otps ADD COLUMN IF NOT EXISTS used_at TIMESTAMP;
     """)
     conn.commit()
     cur.close()
@@ -422,6 +491,22 @@ def clear_rate_limit(conn, key):
     cur.close()
 
 
+def get_rate_limit_count(conn, key, window_seconds=900):
+    """Returns current failure count for a key within window_seconds, or 0 if expired."""
+    cur = conn.cursor()
+    now = datetime.now()
+    cur.execute("SELECT count, first_attempt FROM rate_limits WHERE key = %s", (key,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return 0
+    count, first_attempt = row
+    if (now - first_attempt).total_seconds() > window_seconds:
+        return 0
+    return count
+    cur.close()
+
+
 def log_security_event(conn, event_type, subject=None, ip=None, user_agent=None, details=None):
     """
     Records security events in security_audit_log.
@@ -509,6 +594,21 @@ def ensure_active_application_index(conn):
     """)
     conn.commit()
     cur.close()
+
+
+def ensure_all_tables(conn=None):
+    """Idempotently ensure all application, drafts, security, and migration tables/indexes exist."""
+    close_on_exit = False
+    if conn is None:
+        conn = get_db()
+        close_on_exit = True
+    try:
+        ensure_drafts_table(conn)
+        ensure_security_tables(conn)
+        ensure_active_application_index(conn)
+    finally:
+        if close_on_exit:
+            conn.close()
 
 
 def format_utc_iso(dt):
@@ -670,7 +770,7 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
         recomputed_hash = compute_payload_hash(canonical_str)
 
         # Integrity check: stored payload must match stored hash
-        if not hmac.compare_digest(recomputed_hash, stored_hash):
+        if not secure_compare(recomputed_hash, stored_hash):
             conn.rollback()
             return False, {
                 "status": "error",
@@ -679,7 +779,7 @@ def submit_draft(conn, citizen_id, draft_id, provided_hash, cfg=None):
             }
 
         # Authenticity check: provided token/hash must match stored hash
-        if not hmac.compare_digest(provided_hash, stored_hash):
+        if not secure_compare(provided_hash, stored_hash):
             conn.rollback()
             return False, {
                 "status": "error",

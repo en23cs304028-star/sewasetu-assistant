@@ -3,14 +3,20 @@
 {$DOMAIN:localhost} {
     # Route RFC 9728 discovery and MCP endpoints to the MCP server
     handle /.well-known/oauth-protected-resource* {
-        reverse_proxy mcp:8010
+        reverse_proxy mcp:8010 {
+            header_up X-Forwarded-For {remote_host}
+        }
     }
     handle /mcp/* {
-        reverse_proxy mcp:8010
+        reverse_proxy mcp:8010 {
+            header_up X-Forwarded-For {remote_host}
+        }
     }
 
     # Route all portal web routes, OAuth 2.1, and /eval-dashboard to app
     handle {
-        reverse_proxy app:8000
+        reverse_proxy app:8000 {
+            header_up X-Forwarded-For {remote_host}
+        }
     }
 }

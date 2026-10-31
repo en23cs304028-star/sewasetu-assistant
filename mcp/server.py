@@ -24,6 +24,12 @@ import citizen
 import officer
 import services
 
+# Ensure schema tables are present at startup
+try:
+    services.ensure_all_tables()
+except Exception:
+    pass
+
 app = Flask(__name__)
 
 # Citizen tool schemas (6 tools)
@@ -184,20 +190,26 @@ def authenticate_request(role, endpoint_path):
 
     valid, result = auth.verify_token(token, expected_resource=canonical_resource, expected_role=role)
     if not valid:
+        if str(result).startswith("auth_service_unavailable"):
+            resp = jsonify({
+                "error": "service_unavailable",
+                "error_description": "Authentication database service is temporarily unavailable."
+            })
+            resp.status_code = 503
+            return False, resp, None
+
         try:
             conn_sec = services.get_db()
-            if not type(conn_sec).__module__.startswith("unittest.mock"):
-                xff = request.headers.get("X-Forwarded-For")
-                ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "127.0.0.1")
-                services.log_security_event(
-                    conn_sec,
-                    event_type="token_rejected",
-                    subject=None,
-                    ip=ip,
-                    user_agent=request.user_agent.string if request.user_agent else None,
-                    details={"reason": str(result), "path": endpoint_path}
-                )
-                conn_sec.close()
+            ip = services.get_client_ip(request)
+            services.log_security_event(
+                conn_sec,
+                event_type="token_rejected",
+                subject=None,
+                ip=ip,
+                user_agent=request.user_agent.string if request.user_agent else None,
+                details={"reason": str(result), "path": endpoint_path}
+            )
+            conn_sec.close()
         except Exception:
             pass
         is_forbidden = "forbidden" in str(result)
@@ -351,8 +363,8 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
         # Group 5: Per-citizen rate limit on prepare_application to prevent DB draft bloat
         if tool_name == "prepare_application":
             mobile = subject.split(":", 1)[1] if ":" in subject else subject
-            conn = services.get_db()
-            if not type(conn).__module__.startswith("unittest.mock"):
+            try:
+                conn = services.get_db()
                 allowed, retry_after = services.check_rate_limit(conn, f"draft_spam:{mobile}", max_attempts=10, window_seconds=600)
                 conn.close()
                 if not allowed:
@@ -366,6 +378,16 @@ def process_jsonrpc(req_data, tools_list, tool_handler, subject):
                             "message": "Rate limit exceeded: too many prepare_application calls for this citizen. Please wait before creating another draft."
                         }
                     }
+            except Exception as e:
+                return {
+                    "_status_code": 503,
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32000,
+                        "message": "Rate limiting database service unavailable."
+                    }
+                }
 
         try:
             res = tool_handler(tool_name, args, subject)
@@ -413,10 +435,9 @@ def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
         resp.headers["Allow"] = "POST"
         return resp
 
-    xff = request.headers.get("X-Forwarded-For")
-    ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "127.0.0.1")
-    conn = services.get_db()
-    if not type(conn).__module__.startswith("unittest.mock"):
+    ip = services.get_client_ip(request)
+    try:
+        conn = services.get_db()
         allowed, retry_after = services.check_rate_limit(conn, f"mcp_ip:{ip}", 240, 60)
         conn.close()
         if not allowed:
@@ -424,6 +445,10 @@ def _handle_mcp_request(role, endpoint_path, tools_list, tool_handler):
             resp.status_code = 429
             resp.headers["Retry-After"] = str(max(1, retry_after))
             return resp
+    except Exception as e:
+        resp = jsonify({"error": "service_unavailable", "message": "Rate limiting database service unavailable."})
+        resp.status_code = 503
+        return resp
 
     ok, err_resp, subject = authenticate_request(role, endpoint_path)
     if not ok:
