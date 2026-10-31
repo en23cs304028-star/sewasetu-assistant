@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-31 23:03:12",
+  "timestamp": "2026-10-31 23:52:43",
   "evaluation_tier": "two_tier",
   "deterministic_checks": {
     "total": 14,
@@ -47,9 +47,9 @@
           "tool_call": "prepare_application",
           "response": {
             "status": "ready_for_confirmation",
-            "draft_id": "mY746IcxUgaZodNJBuli_fDA1NA_AawF",
-            "payload_hash": "1ed5f5feaac5581dc4b031c41e659f3e08552d5b3f4fb8b0250de9b6132460a7",
-            "confirmation_token": "mY746IcxUgaZodNJBuli_fDA1NA_AawF.1ed5f5feaac5581dc4b031c41e659f3e08552d5b3f4fb8b0250de9b6132460a7",
+            "draft_id": "cb6o4i3PdJVi92y0ERGYRT9cCrOnJ6uF",
+            "payload_hash": "5dbf095d8ecf18984ba14a1a4320046a01ed6f979385c79f2bab714c1642dce6",
+            "confirmation_token": "cb6o4i3PdJVi92y0ERGYRT9cCrOnJ6uF.5dbf095d8ecf18984ba14a1a4320046a01ed6f979385c79f2bab714c1642dce6",
             "valid_for_minutes": 30,
             "preview": {
               "applicant_name": "Sundari Bai",
@@ -74,13 +74,13 @@
           "tool_call": "submit_application",
           "response": {
             "status": "submitted",
-            "application_number": "SSP26292078",
+            "application_number": "SSP26990556",
             "applicant_name": "Sundari Bai",
-            "submission_date": "31/10/2026 17:33",
+            "submission_date": "31/10/2026 18:22",
             "status_code": "PENDING",
             "sms_sent": true,
-            "message": "Application SSP26292078 successfully submitted.",
-            "message_hi": "Aapka aavedan kramank SSP26292078 safaltapoorvak jama ho gaya hai.",
+            "message": "Application SSP26990556 successfully submitted.",
+            "message_hi": "Aapka aavedan kramank SSP26990556 safaltapoorvak jama ho gaya hai.",
             "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
           }
         }
@@ -302,9 +302,9 @@
           "tool_call": "prepare_application",
           "response": {
             "status": "ready_for_confirmation",
-            "draft_id": "IyglHrWbEvw0l9-krnw1yATUgV9BKJX7",
-            "payload_hash": "fb952bbf6789ae9c02d95f88cd249339913340270dd624030ac082da6572680d",
-            "confirmation_token": "IyglHrWbEvw0l9-krnw1yATUgV9BKJX7.fb952bbf6789ae9c02d95f88cd249339913340270dd624030ac082da6572680d",
+            "draft_id": "2y8LlK5HEnDliiFBR2kVrGAGHFLhpqQZ",
+            "payload_hash": "6a6cdb39e7dbea4caa3b90f41579c2b8df8aa0fe8b576e5059dd7c21697fdced",
+            "confirmation_token": "2y8LlK5HEnDliiFBR2kVrGAGHFLhpqQZ.6a6cdb39e7dbea4caa3b90f41579c2b8df8aa0fe8b576e5059dd7c21697fdced",
             "valid_for_minutes": 30,
             "preview": {
               "applicant_name": "Renu Ali",
@@ -372,7 +372,7 @@
           "tool_call": "sign_out",
           "response": {
             "status": "signed_out",
-            "sessions_revoked": "<MagicMock name='mock.cursor().rowcount' id='4432796976'>",
+            "sessions_revoked": "<MagicMock name='mock.cursor().rowcount' id='4429798704'>",
             "message": "You have been signed out safely. Kiosk session cleared.",
             "message_hi": "Aap safaltapoorvak sign out ho gaye hain. Suraksha ke liye session band kar diya gaya hai."
           }
@@ -434,7 +434,7 @@
             "village": "Sonari",
             "block": "Sonari",
             "note": "Document verified and genuine.",
-            "confirmation_token": "conf_RJt_OPTVZU7OLtHFIqVoKmWGe17yZyvAcMWo5BP-6u0",
+            "confirmation_token": "conf_Yb2WdEHbRtOHhf-9D7xlkB-MmN6PKm4DItHh2rVvvdk",
             "expires_in_seconds": 300
           }
         },
@@ -489,7 +489,7 @@
             "village": "Rajapara",
             "block": "Rajapara",
             "reason": "Age proof certificate is unreadable and forged.",
-            "confirmation_token": "conf_Xa30BnAK0L9xWjFVS42s86Rn1-dwJ5ynP_Lkhn5sH5o",
+            "confirmation_token": "conf_45DpVOkzDXTnK_qD0un1c6q3ZbZJJGHQ0MseCwHsEwY",
             "expires_in_seconds": 300
           }
         },

@@ -40,8 +40,18 @@ os.environ.setdefault("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 sys.path.insert(0, os.path.join(BASE_DIR, "app"))
 sys.path.insert(0, os.path.join(BASE_DIR, "mcp"))
 
-import services
-import auth
+try:
+    import services
+except ImportError:
+    from app import services
+
+try:
+    import auth
+except ImportError:
+    import importlib.util
+    _auth_spec = importlib.util.spec_from_file_location("auth", os.path.join(BASE_DIR, "mcp", "auth.py"))
+    auth = importlib.util.module_from_spec(_auth_spec)
+    _auth_spec.loader.exec_module(auth)
 
 # ---------------------------------------------------------------------------
 # Configuration & Credentials (safe reading only from env or gitignored .env)
@@ -120,7 +130,10 @@ def ensure_servers():
         try:
             requests.get("http://127.0.0.1:8010/.well-known/oauth-protected-resource", timeout=0.5)
         except Exception:
-            import server as mcp_server
+            import importlib.util
+            mcp_spec = importlib.util.spec_from_file_location("mcp_server", os.path.join(BASE_DIR, "mcp", "server.py"))
+            mcp_server = importlib.util.module_from_spec(mcp_spec)
+            mcp_spec.loader.exec_module(mcp_server)
             t_mcp = threading.Thread(target=lambda: mcp_server.app.run(host="127.0.0.1", port=8010, debug=False, use_reloader=False), daemon=True)
             t_mcp.start()
 

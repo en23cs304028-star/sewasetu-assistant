@@ -151,7 +151,10 @@ def start_services(base_portal, mcp_base, sms_gw_url):
     os.environ.setdefault("PGPASSWORD", "sewasetu123")
 
     import app as portal_app
-    import server as mcp_server
+    import importlib.util
+    _mcp_spec = importlib.util.spec_from_file_location("mcp_server", os.path.join(BASE_DIR, "mcp", "server.py"))
+    mcp_server = importlib.util.module_from_spec(_mcp_spec)
+    _mcp_spec.loader.exec_module(mcp_server)
     import smsgw.app as smsgw_app
 
     # Check if SMS gateway is already running
