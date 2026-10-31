@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-10-31 14:02:24",
+  "timestamp": "2026-10-31 23:03:12",
   "evaluation_tier": "two_tier",
   "deterministic_checks": {
     "total": 14,
-    "passed": 13,
-    "pass_rate_pct": 92.9,
+    "passed": 14,
+    "pass_rate_pct": 100.0,
     "description": "Deterministic protocol, schema, database boundary, and SLA rule assertions"
   },
   "llm_evaluations": {
@@ -14,8 +14,8 @@
     "description": "Multi-turn LLM agent evaluation over live streamable HTTP MCP endpoint"
   },
   "total_personas": 14,
-  "total_passed": 13,
-  "pass_rate_pct": 92.9,
+  "total_passed": 14,
+  "pass_rate_pct": 100.0,
   "results": [
     {
       "id": "persona_01_sundari_bai",
@@ -47,9 +47,9 @@
           "tool_call": "prepare_application",
           "response": {
             "status": "ready_for_confirmation",
-            "draft_id": "q5RqF_4eOvHHI2Bu-fbBWQhMmADE77D3",
-            "payload_hash": "14f1f17facab37b2a516be3dd044f4f7bb2f27a7d0920cac9b70c3770b5bb85d",
-            "confirmation_token": "q5RqF_4eOvHHI2Bu-fbBWQhMmADE77D3.14f1f17facab37b2a516be3dd044f4f7bb2f27a7d0920cac9b70c3770b5bb85d",
+            "draft_id": "mY746IcxUgaZodNJBuli_fDA1NA_AawF",
+            "payload_hash": "1ed5f5feaac5581dc4b031c41e659f3e08552d5b3f4fb8b0250de9b6132460a7",
+            "confirmation_token": "mY746IcxUgaZodNJBuli_fDA1NA_AawF.1ed5f5feaac5581dc4b031c41e659f3e08552d5b3f4fb8b0250de9b6132460a7",
             "valid_for_minutes": 30,
             "preview": {
               "applicant_name": "Sundari Bai",
@@ -74,13 +74,13 @@
           "tool_call": "submit_application",
           "response": {
             "status": "submitted",
-            "application_number": "SSP26696747",
+            "application_number": "SSP26292078",
             "applicant_name": "Sundari Bai",
-            "submission_date": "31/10/2026 08:32",
+            "submission_date": "31/10/2026 17:33",
             "status_code": "PENDING",
             "sms_sent": true,
-            "message": "Application SSP26696747 successfully submitted.",
-            "message_hi": "Aapka aavedan kramank SSP26696747 safaltapoorvak jama ho gaya hai.",
+            "message": "Application SSP26292078 successfully submitted.",
+            "message_hi": "Aapka aavedan kramank SSP26292078 safaltapoorvak jama ho gaya hai.",
             "tracking_instruction": "You can track your application anytime using your mobile number and date of birth (DDMMYYYY)."
           }
         }
@@ -302,9 +302,9 @@
           "tool_call": "prepare_application",
           "response": {
             "status": "ready_for_confirmation",
-            "draft_id": "TUIlNxeI8wtKdE_k6V3rQ9WKpuG_GGIX",
-            "payload_hash": "2b5bf8fe39ab8341d85af280e8ddaac254b47c4a4236f5ac7d3f18e435f198fe",
-            "confirmation_token": "TUIlNxeI8wtKdE_k6V3rQ9WKpuG_GGIX.2b5bf8fe39ab8341d85af280e8ddaac254b47c4a4236f5ac7d3f18e435f198fe",
+            "draft_id": "IyglHrWbEvw0l9-krnw1yATUgV9BKJX7",
+            "payload_hash": "fb952bbf6789ae9c02d95f88cd249339913340270dd624030ac082da6572680d",
+            "confirmation_token": "IyglHrWbEvw0l9-krnw1yATUgV9BKJX7.fb952bbf6789ae9c02d95f88cd249339913340270dd624030ac082da6572680d",
             "valid_for_minutes": 30,
             "preview": {
               "applicant_name": "Renu Ali",
@@ -372,7 +372,7 @@
           "tool_call": "sign_out",
           "response": {
             "status": "signed_out",
-            "sessions_revoked": "<MagicMock name='mock.cursor().rowcount' id='4392908992'>",
+            "sessions_revoked": "<MagicMock name='mock.cursor().rowcount' id='4432796976'>",
             "message": "You have been signed out safely. Kiosk session cleared.",
             "message_hi": "Aap safaltapoorvak sign out ho gaye hain. Suraksha ke liye session band kar diya gaya hai."
           }
@@ -434,7 +434,7 @@
             "village": "Sonari",
             "block": "Sonari",
             "note": "Document verified and genuine.",
-            "confirmation_token": "conf_4iFStMGoE1AfnMh_Dgp2XkM35zO1EbdJP2urboiLZ3o",
+            "confirmation_token": "conf_RJt_OPTVZU7OLtHFIqVoKmWGe17yZyvAcMWo5BP-6u0",
             "expires_in_seconds": 300
           }
         },
@@ -489,7 +489,7 @@
             "village": "Rajapara",
             "block": "Rajapara",
             "reason": "Age proof certificate is unreadable and forged.",
-            "confirmation_token": "conf_2L-VE7UZwXUafALJb6eF5rC5W_Lgo58tY2uY_V2sB6A",
+            "confirmation_token": "conf_Xa30BnAK0L9xWjFVS42s86Rn1-dwJ5ynP_Lkhn5sH5o",
             "expires_in_seconds": 300
           }
         },
@@ -563,11 +563,11 @@
       "name": "Test Integration: Session Expiry Recovery",
       "persona_type": "integration",
       "tier": "deterministic_protocol_assertion",
-      "passed": false,
+      "passed": true,
       "checks": [
         {
           "check": "expired_token_rejected",
-          "passed": false
+          "passed": true
         }
       ],
       "transcript": [
@@ -576,7 +576,7 @@
           "action": "verify_expired_token",
           "result": [
             false,
-            "token_verification_failed: Token is missing the \"jti\" claim"
+            "token_expired"
           ]
         }
       ],

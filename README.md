@@ -1,83 +1,130 @@
-# Sewa Setu — Old Age Pension Portal
+# Sewa Setu — Old Age Pension Portal & Model Context Protocol (MCP) Server
 
 Department of Social Welfare, Government of Purvanchal. Maintained in-house.
 
-## Running
+---
 
-```
+## 1. Quick Start (Local Development)
+
+```bash
 ADMIN_PASSWORD=pick-something docker compose up --build
 ```
 
-- Portal: http://localhost:8000
-- Status portal: http://localhost:8000/status (mobile number + password; the
-  password is the applicant's date of birth as DDMMYYYY)
-- Departmental login: http://localhost:8000/admin (user `admin`, password from
-  `ADMIN_PASSWORD`)
-- SMS gateway console (simulated telecom): http://localhost:8000/__gateway/ —
-  OTPs and notifications appear here once "delivered" (1–4 s carrier latency).
-  The gateway's inbox is also readable as JSON at
-  `/__gateway/api/messages?to=<mobile>`.
-- Database: Postgres, loaded from `seed/seed.sql` on first boot (~100k applications).
+- **Web Portal:** http://localhost:8000
+- **Citizen Status Portal:** http://localhost:8000/status (mobile number + date of birth password as DDMMYYYY)
+- **Departmental Officer Login:** http://localhost:8000/admin (username `admin`, password from `ADMIN_PASSWORD`)
+- **Evaluation Dashboard:** http://localhost:8000/eval-dashboard (view persona evaluation runs and defect resolution logs)
+- **SMS Gateway Console:** http://localhost:8000/__gateway/ (simulated carrier inbox, readable at `/__gateway/api/messages?to=<mobile>`)
+- **Database:** PostgreSQL 15, seeded from `seed/seed.sql` on first boot (~100,000 production records)
 
-## Deploying on a server
+---
 
-Set `PUBLIC_BASE_URL` to the address people will use (for example
-`https://sewasetu.example.in`). It is stamped into sign-in tokens and the discovery documents
-described below, so a wrong value means other applications cannot find the sign-in page. Put
-the portal behind HTTPS; some applications refuse to sign in over plain HTTP.
+## 2. Model Context Protocol (MCP) Endpoints
 
-```
-PUBLIC_BASE_URL=https://sewasetu.example.in ADMIN_PASSWORD=pick-something docker compose up --build -d
-```
+Sewa Setu implements two streamable HTTP MCP servers (version `2024-11-05` / `2026-07-28` compatible) protected by OAuth 2.1 RS256 Bearer tokens and RFC 9728 metadata discovery:
 
-## What the portal does
+- **Citizen Endpoint (`/mcp/citizen`):** 6 tools for applicants:
+  1. `get_scheme_info`: Statutory scheme rules, eligibility age (60+), 15-day SLA, and required documents.
+  2. `get_my_status`: Case tracking, status explanation in Hindi & English, and remaining SLA days.
+  3. `prepare_application`: Full validation dry-run, generating a single-use 15-minute `confirmation_token` bound to a SHA-256 hash of the draft in PostgreSQL.
+  4. `submit_application`: Atomically commits the draft using the `confirmation_token`.
+  5. `withdraw_application`: Statutory withdrawal of a pending application (`confirm=True`).
+  6. `sign_out`: Immediate session termination and database token revocation for public kiosk terminals.
 
-Citizen flow: mobile → OTP → personal details → address → bank details →
-age-proof upload → preview and declaration → application number. A nightly
-job (`scripts/deemed_approval.py`, via cron in the `scheduler` container)
-deems approved any application still pending after the 15-day statutory SLA.
+- **Officer Endpoint (`/mcp/officer`):** 5 tools for departmental triage:
+  1. `queue_summary`: Queue metrics broken down by status, oldest pending days, and SLA urgency cutoff (>= 13 days).
+  2. `list_applications`: Paginated queue listing with urgency sorting.
+  3. `get_application`: Complete case dossier with chronological audit log and informational fraud flags (e.g. shared Jan Dhan accounts).
+  4. `approve_application`: Two-step confirmation flow requiring dry-run token preview before final approval.
+  5. `reject_application`: Two-step confirmation flow requiring mandatory non-empty recorded justification under natural justice rules.
 
-Rules enforced at submission, in `validate_application()` in `app/app.py`:
-applicant is 60 years of age or above; required fields and an age-proof
-document are present; the scheme window is open; and the mobile number holds
-no other active (pending / approved / deemed-approved) application. A pending
-application can be withdrawn from the status portal, after which the same
-mobile may apply again.
+- **RFC 9728 Discovery:** `GET /.well-known/oauth-protected-resource` (and subpaths `/mcp/citizen` and `/mcp/officer`).
 
-Departmental users see a dashboard, list and filter applications, approve or
-reject pending ones, and see the audit trail per application.
+---
 
-## Layout
+## 3. Production Deployment with Caddy (Automatic HTTPS)
 
-```
-app/          Flask application, templates, config, nightly job
-seed/         seed.sql — production data snapshot
-smsgw/        simulated SMS gateway
+The production stack uses Caddy 2 for automated Let's Encrypt TLS termination, HTTP/2 support, reverse proxying, and HTTP security headers (HSTS, CSP, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer).
+
+```bash
+PUBLIC_BASE_URL=https://sewasetu.example.in \
+DOMAIN=sewasetu.example.in \
+ADMIN_PASSWORD=strong-admin-password \
+POSTGRES_PASSWORD=strong-db-password \
+docker compose --profile caddy up --build -d
 ```
 
-## Letting other applications act for a citizen or an officer
+### Production Security Architecture
+- **Non-Root Containers:** All services run as unprivileged users (`appuser` UID 10001, Caddy UID 1000, Postgres UID 999).
+- **Dropped Capabilities:** `cap_drop: [ALL]` across all services; Caddy granted strictly `NET_BIND_SERVICE` for low ports (80/443).
+- **Strict Network Isolation:** Internal database, app, and MCP services communicate over Docker bridge network; only ports 80 and 443 are exposed publicly.
+- **Client IP Behind Proxy:** Trusted proxy CIDR checking (`TRUSTED_PROXY_CIDRS`) parses `X-Forwarded-For` right-most entries, preventing IP-spoofing bypasses.
+- **Durable Drafts & Concurrency Safety:** Draft applications stored in PostgreSQL `confirmation_tokens` with PostgreSQL advisory locks (`pg_advisory_lock(42424242)`) to eliminate multi-worker startup race conditions.
 
-Sewa Setu is also an **OAuth 2.1 authorization server**. A third-party application can act
-for a citizen (scope `citizen`) or for a block officer (scope `officer`) once that person
-signs in on the portal and approves it. Citizens sign in by mobile and OTP, officers with the
-departmental login. The application never handles the OTP or the password.
+---
 
-- Discovery: `/.well-known/oauth-authorization-server` (RFC 8414)
-- Registration: `/oauth/register` (RFC 7591), or a client ID metadata document URL as `client_id`
-- Authorization: `/oauth/authorize` (authorization code with PKCE S256; the `resource` the
-  application asks for becomes the token's audience, RFC 8707)
-- Tokens: `/oauth/token`. Access tokens are RS256 JWTs. A sign-in is a **session with an
-  absolute end**: 2 hours for a citizen, 8 hours for an officer, counted from the consent.
-  Access tokens are short (20 / 30 minutes) and refresh tokens rotate within the session but
-  never extend it; after it ends the person signs in again. Portals are used on shared phones
-  and kiosks.
-- Sign-out: `/oauth/revoke` (RFC 7009). People can also end any sign-in from the status
-  portal (**Connected applications**) or, for officers, the admin dashboard.
-- Keys: `/.well-known/jwks.json`
+## 4. Running Tests & Evaluations
 
-A service that receives one of these tokens verifies it with the JWKS, checks `iss` is this
-portal, checks `aud` is its own canonical URL, and reads `scope`, `role` and `sub`
-(`citizen:<mobile>` or `officer:<username>`).
+### Automated Test Suite (168 Tests)
+The comprehensive test suite verifies core services, MCP HTTP transport, concurrency safety, and full red-team penetration suites (Threats A through H):
 
-Long-lived **program tokens** for unattended use (role officer) are issued by an
-administrator at `/admin/tokens`.
+```bash
+python3 -m unittest discover tests
+```
+
+### Persona Evaluation Harness (14 Scenarios)
+The evaluation suite asserts exact statutory outcomes, edge cases (e.g., exact 60-year boundary birthday, shared Jan Dhan bank accounts, prompt injection refusal, and kiosk sign-outs):
+
+```bash
+python3 evals/runner.py
+```
+View the rendered dashboard at `/eval-dashboard`.
+
+---
+
+## 5. Operations & Maintenance
+
+- **Clear Login Lockouts:**
+  ```bash
+  docker compose exec app python scripts/clear_lockouts.py --ip <ip_address>
+  # or clear specific user:
+  docker compose exec app python scripts/clear_lockouts.py --username admin
+  ```
+
+- **Run Data Retention Cleanup (OTPs, Expired Tokens, Old Audit Logs):**
+  ```bash
+  docker compose exec app python scripts/retention_cleanup.py
+  ```
+
+- **Initialize / Verify Schema:**
+  ```bash
+  docker compose exec app python scripts/init_db.py
+  ```
+
+- **Verify Deployment Health:**
+  ```bash
+  ./scripts/verify_deploy.sh
+  ```
+
+---
+
+## 6. Directory Layout
+
+```text
+app/                  Flask portal application, OAuth 2.1 AS, services.py domain logic, and templates
+  config/app.ini      Portal scheme configuration (60 yr min age, 15 day SLA, eligible blocks)
+  scripts/            Operational scripts (deemed_approval, clear_lockouts, retention_cleanup, init_db)
+  services.py         Authoritative pure-Python domain module (zero Flask dependencies)
+mcp/                  Standalone streamable HTTP MCP server
+  citizen.py          Citizen tool implementations (6 tools)
+  officer.py          Officer tool implementations (5 tools)
+  auth.py             OAuth 2.1 RS256 token verification, RFC 9728 discovery, session revocation
+  server.py           Streamable HTTP JSON-RPC 2.0 dispatcher
+seed/seed.sql         100,000-row production snapshot for local testing
+smsgw/                Simulated SMS gateway for OTP delivery and notifications
+evals/                14-persona evaluation specifications, results, and test harnesses
+tests/                168 automated tests (unit, wire-level HTTP, concurrency, and security attack suite)
+  security/           Red-team penetration suites covering Threats A through H and SSRF mitigations
+Caddyfile             Production reverse proxy, TLS termination, and security headers
+docker-compose.yml    Multi-service production container orchestration
+```

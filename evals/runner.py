@@ -34,6 +34,8 @@ if "psycopg2" not in sys.modules:
         sys.modules["psycopg2"] = mock_pg
 
 import services
+# Mock ensure_all_tables during deterministic eval runs to prevent connecting to offline db at import time
+services.ensure_all_tables = MagicMock()
 import citizen
 import officer
 import auth
@@ -371,12 +373,16 @@ def run_evals():
 
         elif pid == "persona_14_integration_session_expiry":
             # Test token expired
+            now = int(time.time())
             expired_claims = {
                 "iss": "http://localhost:8000",
                 "sub": "citizen:9990001009",
                 "aud": "http://localhost:8000/mcp/citizen",
                 "role": "citizen",
-                "exp": int(time.time()) - 100
+                "jti": "test-expired-jti-1234",
+                "iat": now - 3600,
+                "nbf": now - 3600,
+                "exp": now - 100
             }
             priv_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             exp_tok = jwt.encode(expired_claims, priv_key, algorithm="RS256", headers={"kid": "k1"})

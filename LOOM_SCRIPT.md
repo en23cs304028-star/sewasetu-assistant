@@ -57,7 +57,7 @@
 - **On Screen:** `Caddyfile`, `docker-compose.yml`, and GitHub repository commit log.
 - **Spoken Audio:**
   > "If there's one technical decision we would change, it's abandoning stateful Server-Sent Events in favor of pure Stateless HTTP POST. Persistent SSE connections frequently break over rural 2G/3G mobile networks and cloud load balancers; stateless HTTP with confirmation tokens proved far more resilient.
-  > The system is fully containerized with Docker Compose and Caddy for HTTPS reverse proxying, tested with 39 unit and wire tests, and version-controlled on GitHub.
+  > The system is fully containerized with Docker Compose and Caddy for HTTPS reverse proxying, tested with 168 unit, wire, and penetration tests, and version-controlled on GitHub.
   > Thank you for reviewing."
 
 ---
@@ -67,4 +67,4 @@
 2. Start MCP server: `python3 mcp/server.py` (port 8010).
 3. Browser Tab 1: `http://localhost:8000/eval-dashboard`.
 4. Browser Tab 2: `http://localhost:8000/admin/queue` (login: `admin` / `<ADMIN_PASSWORD from env>`).
-5. Terminal: Run `python3 -m unittest discover tests` (39 tests pass).
+5. Terminal: Run `python3 -m unittest discover tests` (168 tests pass).
