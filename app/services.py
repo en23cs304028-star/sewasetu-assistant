@@ -596,7 +596,7 @@ def ensure_active_application_index(conn):
         HAVING count(*) > 1
     """)
     dups = cur.fetchall()
-    if dups:
+    if isinstance(dups, list) and len(dups) > 0:
         cur.close()
         raise RuntimeError(f"Cannot create unique index: duplicate active applications exist in DB: {dups}")
     cur.execute("""

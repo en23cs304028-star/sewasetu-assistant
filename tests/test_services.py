@@ -266,7 +266,14 @@ class TestEvalDashboardRoute(unittest.TestCase):
     def setUpClass(cls):
         os.environ.setdefault("ADMIN_PASSWORD", "test-admin-secret")
         sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app")))
-        with patch.dict(sys.modules, {"psycopg2": MagicMock(), "fpdf": MagicMock()}):
+        mock_pg = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = []
+        mock_cur.fetchone.return_value = None
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_pg.connect.return_value = mock_conn
+        with patch.dict(sys.modules, {"psycopg2": mock_pg, "fpdf": MagicMock()}):
             import app as flask_app
             cls.app_client = flask_app.app.test_client()
 
