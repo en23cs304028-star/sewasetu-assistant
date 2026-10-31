@@ -28,13 +28,21 @@ import services
 
 logger = logging.getLogger("sewasetu.mcp")
 
-# Ensure schema tables are present at startup
+# Ensure schema tables are present at startup under advisory lock
 try:
     services.ensure_all_tables()
-except Exception:
-    pass
+except Exception as e:
+    logger.critical("FATAL: Database schema initialization failed: %s", e, exc_info=True)
+    raise RuntimeError(f"Database schema initialization failed: {e}") from e
 
 app = Flask(__name__)
+
+@app.route("/health")
+def health():
+    ok, missing = services.check_required_tables()
+    if not ok:
+        return jsonify({"status": "unhealthy", "missing_tables": missing}), 503
+    return jsonify({"status": "healthy"}), 200
 
 @app.after_request
 def set_security_headers(response):

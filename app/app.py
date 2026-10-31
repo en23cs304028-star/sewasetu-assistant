@@ -29,7 +29,7 @@ import requests
 import psycopg2
 import logging
 from flask import (Flask, request, session, redirect, url_for, render_template,
-                   flash, send_file, abort)
+                   flash, send_file, abort, jsonify)
 from fpdf import FPDF
 
 logger = logging.getLogger("sewasetu.portal")
@@ -65,11 +65,19 @@ if is_production:
 elif not ADMIN_PASSWORD:
     raise RuntimeError("ADMIN_PASSWORD environment variable must be set. The application will not start without it.")
 
-# Ensure schema and security tables are created at startup
+# Ensure schema and security tables are verified/created under advisory lock
 try:
     services.ensure_all_tables()
 except Exception as e:
-    logger.warning("Could not run startup table migrations (will retry on DB connect): %s", e)
+    logger.critical("FATAL: Database schema initialization failed: %s", e, exc_info=True)
+    raise RuntimeError(f"Database schema initialization failed: {e}") from e
+
+@app.route("/health")
+def health():
+    ok, missing = services.check_required_tables()
+    if not ok:
+        return jsonify({"status": "unhealthy", "missing_tables": missing}), 503
+    return jsonify({"status": "healthy"}), 200
 
 def get_csrf_token():
     if "csrf_token" not in session:

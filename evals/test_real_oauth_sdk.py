@@ -57,6 +57,30 @@ def get_mcp_http_client(headers=None):
     return mcp_sh.create_mcp_http_client(headers=headers)
 
 
+def parse_tool_content(res_or_content):
+    """Safely parse tool response content as JSON.
+    If the response is non-JSON text, prints the raw text prominently and raises RuntimeError.
+    """
+    if hasattr(res_or_content, "content"):
+        content = res_or_content.content
+    else:
+        content = res_or_content
+    if not content:
+        raise RuntimeError("Tool returned empty content")
+    first = content[0]
+    raw_text = first.text if hasattr(first, "text") else (first.get("text") if isinstance(first, dict) else str(first))
+    try:
+        return json.loads(raw_text)
+    except Exception as exc:
+        print(f"\n============================================================")
+        print(f"ERROR: Tool response is NOT valid JSON!")
+        print(f"--- RAW TOOL RESPONSE TEXT ---")
+        print(raw_text)
+        print(f"--- END RAW TOOL RESPONSE ---")
+        print(f"============================================================\n")
+        raise RuntimeError(f"Tool returned non-JSON response: {raw_text}") from exc
+
+
 def get_base_url():
     """Determine base URL from CLI argument, environment variable, or default."""
     for arg in sys.argv[1:]:
@@ -367,20 +391,20 @@ async def run_citizen_journey(mcp_base, citizen_token):
 
                 # 1. prepare_application
                 prep_res = await session.call_tool("prepare_application", prepare_payload)
-                prep_data = json.loads(prep_res.content[0].text)
+                prep_data = parse_tool_content(prep_res)
                 confirm_token = prep_data.get("confirmation_token")
 
                 # 2. submit_application
                 sub_res = await session.call_tool("submit_application", {"confirmation_token": confirm_token})
-                sub_data = json.loads(sub_res.content[0].text)
+                sub_data = parse_tool_content(sub_res)
 
                 # 3. submit same token again (must be rejected)
                 resub_res = await session.call_tool("submit_application", {"confirmation_token": confirm_token})
-                resub_data = json.loads(resub_res.content[0].text)
+                resub_data = parse_tool_content(resub_res)
 
                 # 4. track status
                 status_res = await session.call_tool("get_my_status", {})
-                status_data = json.loads(status_res.content[0].text)
+                status_data = parse_tool_content(status_res)
 
                 return prep_data, sub_data, resub_data, status_data
 
@@ -415,7 +439,7 @@ async def run_p0_2(base_portal, mcp_base, officer_token):
 
                 # 3. queue_summary
                 qs_res = await session.call_tool("queue_summary", {})
-                qs_data = json.loads(qs_res.content[0].text)
+                qs_data = parse_tool_content(qs_res)
                 print(f"[3/5] queue_summary:")
                 print(f"      Status: {qs_data.get('status')}")
                 print(f"      Total Pending: {qs_data.get('total_pending')}")
@@ -427,7 +451,7 @@ async def run_p0_2(base_portal, mcp_base, officer_token):
 
                 # 4. list_applications
                 la_res = await session.call_tool("list_applications", {"status": "PENDING", "limit": 5, "order_by": "newest_first"})
-                la_data = json.loads(la_res.content[0].text)
+                la_data = parse_tool_content(la_res)
                 apps = la_data.get("applications", [])
                 print(f"[4/5] list_applications (status=PENDING, limit=5, order_by=newest_first):")
                 print(f"      Count on page: {len(apps)}")
@@ -437,7 +461,7 @@ async def run_p0_2(base_portal, mcp_base, officer_token):
 
                 # 5. get_application
                 ga_res = await session.call_tool("get_application", {"app_id": sample_app_id})
-                ga_data = json.loads(ga_res.content[0].text)
+                ga_data = parse_tool_content(ga_res)
                 print(f"[5/5] get_application (app_id={sample_app_id}):")
                 print(f"      Status: {ga_data.get('status')}")
                 print(f"      App No: {ga_data.get('application_no')}")
@@ -476,13 +500,13 @@ async def submit_citizen_application(base_portal, mcp_base, sms_gw_url, mobile, 
                     "document_base64": base64.b64encode(b"Dummy Voter Card Certificate Payload").decode("ascii")
                 }
                 prep_res = await session.call_tool("prepare_application", payload)
-                prep_data = json.loads(prep_res.content[0].text)
+                prep_data = parse_tool_content(prep_res)
                 assert prep_data.get("status") == "ready_for_confirmation", f"prepare failed: {prep_data}"
                 tok = prep_data.get("confirmation_token")
 
                 # Submit
                 sub_res = await session.call_tool("submit_application", {"confirmation_token": tok})
-                sub_data = json.loads(sub_res.content[0].text)
+                sub_data = parse_tool_content(sub_res)
                 assert sub_data.get("status") == "submitted", f"submit failed: {sub_data}"
                 app_no = sub_data.get("application_number")
                 return token, app_no
@@ -497,7 +521,7 @@ async def check_citizen_status(mcp_base, citizen_token):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 status_res = await session.call_tool("get_my_status", {})
-                return json.loads(status_res.content[0].text)
+                return parse_tool_content(status_res)
 
 
 async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_username="admin"):
@@ -566,7 +590,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                 # Step 3: Officer lists pending applications to find IDs
                 print(f"\n--- Step 3: Officer lists pending applications ---")
                 la_res = await session.call_tool("list_applications", {"status": "PENDING", "limit": 50, "order_by": "newest_first"})
-                la_data = json.loads(la_res.content[0].text)
+                la_data = parse_tool_content(la_res)
                 apps = la_data.get("applications", [])
 
                 app_id_1 = None
@@ -588,7 +612,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "app_id": app_id_1,
                     "note": f"Verification passed for {app_no_1}; valid age proof."
                 })
-                conf_data = json.loads(conf_req.content[0].text)
+                conf_data = parse_tool_content(conf_req)
                 print(f"Step 1 Confirmation Request: {conf_data}")
                 assert conf_data.get("status") == "confirmation_required", f"Expected confirmation_required, got {conf_data}"
                 conf_token = conf_data["confirmation_token"]
@@ -598,7 +622,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "note": f"Verification passed for {app_no_1}; valid age proof.",
                     "confirmation_token": conf_token
                 })
-                appr_data = json.loads(appr_res.content[0].text)
+                appr_data = parse_tool_content(appr_res)
                 print(f"Approve Result: {appr_data}")
                 assert appr_data.get("status") == "approved", f"Approval failed: {appr_data}"
 
@@ -609,7 +633,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "app_id": app_id_2,
                     "reason": ""
                 })
-                rej_fail_data = json.loads(rej_fail_res.content[0].text)
+                rej_fail_data = parse_tool_content(rej_fail_res)
                 print(f"Reject without reason response (expected error): {rej_fail_data}")
                 assert rej_fail_data.get("status") == "error", f"Reject without reason was not blocked: {rej_fail_data}"
                 print("P0-4 Rule Verified: Rejection without mandatory reason is refused.")
@@ -619,7 +643,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "app_id": app_id_2,
                     "reason": f"Age proof certificate for {app_no_2} is unreadable and unverifiable."
                 })
-                conf_rej_data = json.loads(conf_req_rej.content[0].text)
+                conf_rej_data = parse_tool_content(conf_req_rej)
                 print(f"Step 1 Reject Confirmation Request: {conf_rej_data}")
                 assert conf_rej_data.get("status") == "confirmation_required", f"Expected confirmation_required, got {conf_rej_data}"
                 conf_rej_token = conf_rej_data["confirmation_token"]
@@ -629,7 +653,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "reason": f"Age proof certificate for {app_no_2} is unreadable and unverifiable.",
                     "confirmation_token": conf_rej_token
                 })
-                rej_data = json.loads(rej_res.content[0].text)
+                rej_data = parse_tool_content(rej_res)
                 print(f"Step 2 Reject with reason response: {rej_data}")
                 assert rej_data.get("status") == "rejected", f"Rejection failed: {rej_data}"
 
@@ -652,7 +676,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "app_id": app_id_1,
                     "note": "Second approval attempt"
                 })
-                dup_appr_data = json.loads(dup_appr.content[0].text)
+                dup_appr_data = parse_tool_content(dup_appr)
                 print(f"Attempting second decision on App 1 (Approved): {dup_appr_data}")
                 assert dup_appr_data.get("status") == "error", f"Duplicate decision on App 1 was not refused: {dup_appr_data}"
                 assert "already decided" in dup_appr_data.get("message", "").lower() or "not found" in dup_appr_data.get("message", "").lower()
@@ -662,7 +686,7 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                     "app_id": app_id_2,
                     "reason": "Second rejection attempt"
                 })
-                dup_rej_data = json.loads(dup_rej.content[0].text)
+                dup_rej_data = parse_tool_content(dup_rej)
                 print(f"Attempting second decision on App 2 (Rejected): {dup_rej_data}")
                 assert dup_rej_data.get("status") == "error", f"Duplicate decision on App 2 was not refused: {dup_rej_data}"
                 assert "already decided" in dup_rej_data.get("message", "").lower() or "not found" in dup_rej_data.get("message", "").lower()
@@ -671,14 +695,14 @@ async def run_p0_3_4(base_portal, mcp_base, sms_gw_url, officer_token, officer_u
                 # Step 8: P0-4 Audit log rows confirmation
                 print(f"\n--- Step 8: Confirm Audit Log Rows via get_application ---")
                 ga1_res = await session.call_tool("get_application", {"app_id": app_id_1})
-                ga1_data = json.loads(ga1_res.content[0].text)
+                ga1_data = parse_tool_content(ga1_res)
                 audit_1 = ga1_data.get("audit_trail", [])
                 print(f"App 1 Audit Trail ({len(audit_1)} events):")
                 for evt in audit_1:
                     print(f"      * [{evt.get('timestamp')}] {evt.get('action')} by {evt.get('actor')} | Note: {evt.get('note')}")
 
                 ga2_res = await session.call_tool("get_application", {"app_id": app_id_2})
-                ga2_data = json.loads(ga2_res.content[0].text)
+                ga2_data = parse_tool_content(ga2_res)
                 audit_2 = ga2_data.get("audit_trail", [])
                 print(f"App 2 Audit Trail ({len(audit_2)} events):")
                 for evt in audit_2:

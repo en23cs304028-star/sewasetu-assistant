@@ -47,6 +47,7 @@ class TestSecurityAuditLog(unittest.TestCase):
         services.ensure_security_tables(conn)
         cur.execute("DELETE FROM security_audit_log")
         cur.execute("DELETE FROM rate_limits")
+        cur.execute("DELETE FROM oauth_clients WHERE kind = 'dcr'")
         conn.commit()
         cur.close()
         conn.close()

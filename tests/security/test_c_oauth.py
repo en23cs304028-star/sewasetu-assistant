@@ -60,11 +60,21 @@ class TestThreatCOAuth(unittest.TestCase):
         conn = portal.get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM rate_limits WHERE key LIKE 'dcr_ip:%'")
+        cur.execute("DELETE FROM oauth_clients WHERE kind = 'dcr' AND (client_id LIKE 'test_client_%' OR client_name LIKE 'Spam Client%')")
         cur.execute(
             "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, secret_hash, kind, created_at, fetched_at) "
             "VALUES (%s, %s, %s, NULL, 'dcr', %s, %s) ON CONFLICT (client_id) DO NOTHING",
             (self.client_id, "Security Test Client", json.dumps([self.redirect_uri]), datetime.now(), datetime.now())
         )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def tearDown(self):
+        conn = portal.get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM rate_limits WHERE key LIKE 'dcr_ip:%'")
+        cur.execute("DELETE FROM oauth_clients WHERE kind = 'dcr' AND (client_id LIKE 'test_client_%' OR client_name LIKE 'Spam Client%')")
         conn.commit()
         cur.close()
         conn.close()

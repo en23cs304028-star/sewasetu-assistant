@@ -52,8 +52,9 @@ services:
       - uploads:/var/sewasetu/uploads
       - applogs:/var/log/sewasetu
       - ./evals:/app/evals:ro
+    command: ["sh", "-c", "python scripts/init_db.py && exec gunicorn --bind 0.0.0.0:8000 --workers 2 --threads 4 --timeout 30 app:app"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/about\")' || exit 1"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request; resp = urllib.request.urlopen(\"http://127.0.0.1:8000/health\"); exit(0 if resp.getcode() == 200 else 1)' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -92,8 +93,9 @@ services:
       - uploads:/var/sewasetu/uploads
       - applogs:/var/log/sewasetu
       - ./evals:/workspace/evals:ro
+    command: ["sh", "-c", "python /workspace/app/scripts/init_db.py && exec gunicorn --bind 0.0.0.0:8010 --workers 2 --threads 4 --timeout 30 server:app"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp/citizen\")' || exit 1"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request; resp = urllib.request.urlopen(\"http://127.0.0.1:8010/health\"); exit(0 if resp.getcode() == 200 else 1)' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -112,7 +114,7 @@ services:
       PGDATABASE: ${POSTGRES_DB:-sewasetu}
       PGUSER: ${POSTGRES_USER:-sewasetu}
       PYTHONPATH: /app
-    command: ["sh", "-c", "printenv > /etc/environment; until python /app/scripts/deemed_approval.py; do sleep 5; done; exec cron -f"]
+    command: ["sh", "-c", "printenv > /etc/environment; python /app/scripts/init_db.py && until python /app/scripts/deemed_approval.py; do sleep 5; done; exec cron -f"]
     depends_on:
       db:
         condition: service_healthy

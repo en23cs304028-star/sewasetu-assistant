@@ -396,7 +396,7 @@ def ensure_security_tables(conn):
 
         CREATE TABLE IF NOT EXISTS confirmation_tokens (
             token_hash      VARCHAR(64) PRIMARY KEY,
-            application_id  INTEGER NOT NULL,
+            application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
             decision        VARCHAR(20) NOT NULL,
             officer_subject VARCHAR(80) NOT NULL,
             reason          VARCHAR(500),
@@ -608,17 +608,84 @@ def ensure_active_application_index(conn):
     cur.close()
 
 
+REQUIRED_TABLES = (
+    "applications",
+    "audit_log",
+    "confirmation_tokens",
+    "drafts",
+    "oauth_clients",
+    "oauth_codes",
+    "oauth_keys",
+    "oauth_program_tokens",
+    "oauth_refresh_tokens",
+    "oauth_requests",
+    "oauth_revocations",
+    "oauth_session_revocations",
+    "otps",
+    "portal_users",
+    "rate_limits",
+    "security_audit_log",
+)
+
+
+def check_required_tables(conn=None):
+    """Checks whether all required database tables exist in the public schema.
+    Returns (ok: bool, missing_tables: list).
+    """
+    close_on_exit = False
+    if conn is None:
+        try:
+            conn = get_db()
+            close_on_exit = True
+        except Exception:
+            return False, list(REQUIRED_TABLES)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+        """)
+        existing = {r[0] for r in cur.fetchall()}
+        cur.close()
+        missing = [t for t in REQUIRED_TABLES if t not in existing]
+        return len(missing) == 0, missing
+    except Exception:
+        return False, list(REQUIRED_TABLES)
+    finally:
+        if close_on_exit:
+            conn.close()
+
+
 def ensure_all_tables(conn=None):
-    """Idempotently ensure all application, drafts, security, and migration tables/indexes exist."""
+    """Idempotently ensure all application, drafts, security, and migration tables/indexes exist.
+    Uses PostgreSQL advisory lock to ensure concurrency safety across parallel processes/workers.
+    Failure is fatal and will raise immediately.
+    """
     close_on_exit = False
     if conn is None:
         conn = get_db()
         close_on_exit = True
+
+    cur = conn.cursor()
+    # Acquire session-level advisory lock (42424242 as migration lock ID)
+    cur.execute("SELECT pg_advisory_lock(42424242);")
     try:
         ensure_drafts_table(conn)
         ensure_security_tables(conn)
         ensure_active_application_index(conn)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error("FATAL: Failed to ensure database tables and schema: %s", e)
+        raise
     finally:
+        try:
+            cur.execute("SELECT pg_advisory_unlock(42424242);")
+            conn.commit()
+        except Exception:
+            pass
+        cur.close()
         if close_on_exit:
             conn.close()
 

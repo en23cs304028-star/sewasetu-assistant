@@ -165,3 +165,17 @@ CREATE INDEX IF NOT EXISTS idx_drafts_citizen_id ON drafts (citizen_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_expires_at ON drafts (expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_application_id ON drafts (application_id) WHERE application_id IS NOT NULL;
 
+-- Single-use officer confirmation tokens for two-step approve/reject decisions
+CREATE TABLE IF NOT EXISTS confirmation_tokens (
+    token_hash      VARCHAR(64) PRIMARY KEY,
+    application_id  INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    decision        VARCHAR(20) NOT NULL,
+    officer_subject VARCHAR(80) NOT NULL,
+    reason          VARCHAR(500),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ NOT NULL,
+    used_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_conf_tokens_app ON confirmation_tokens (application_id);
+
+

@@ -36,18 +36,27 @@ def main():
     conn = services.get_db(config)
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(days=SLA_DAYS)
-    cur.execute(
-        """UPDATE applications
-           SET status = 'DEEMED_APPROVED', decided_at = %s, decided_by = 'RTPS-AUTO'
-           WHERE status = 'PENDING' AND submitted_at < %s
-           RETURNING id, application_no, mobile""",
-        (datetime.now(), cutoff))
-    rows = cur.fetchall()
-    for app_id, app_no, mobile in rows:
-        cur.execute("INSERT INTO audit_log (application_id, action, actor, note, at) "
-                    "VALUES (%s, 'DEEMED_APPROVED', 'system:rtps-cron', "
-                    "'not processed within SLA', %s)", (app_id, datetime.now()))
-    conn.commit()
+    try:
+        cur.execute(
+            """UPDATE applications
+               SET status = 'DEEMED_APPROVED', decided_at = %s, decided_by = 'RTPS-AUTO'
+               WHERE status = 'PENDING' AND submitted_at < %s
+               RETURNING id, application_no, mobile""",
+            (datetime.now(), cutoff))
+        rows = cur.fetchall()
+        for app_id, app_no, mobile in rows:
+            cur.execute("INSERT INTO audit_log (application_id, action, actor, note, at) "
+                        "VALUES (%s, 'DEEMED_APPROVED', 'system:rtps-cron', "
+                        "'not processed within SLA', %s)", (app_id, datetime.now()))
+        conn.commit()
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "undefinedtable" in err_msg or "does not exist" in err_msg:
+            print("%s deemed approval: applications or audit_log table does not exist; skipping" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            cur.close()
+            conn.close()
+            return
+        raise
     for app_id, app_no, mobile in rows:
         try:
             requests.post(SMS_GATEWAY_URL + "/api/send", json={

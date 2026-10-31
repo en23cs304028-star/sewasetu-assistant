@@ -192,6 +192,49 @@ else
     pass "Caddy configuration checked statically"
 fi
 
+# ------------------------------------------------------------------------------
+# 7. Required Database Tables Verification
+# ------------------------------------------------------------------------------
+echo "--- 7. Required Database Tables Verification ---"
+if command -v docker >/dev/null 2>&1 && ${COMPOSE_CMD} ps db 2>/dev/null | grep -q "Up"; then
+    REQUIRED_TABLES=("applications" "audit_log" "confirmation_tokens" "drafts" "oauth_clients" "oauth_codes" "oauth_keys" "oauth_program_tokens" "oauth_refresh_tokens" "oauth_requests" "oauth_revocations" "oauth_session_revocations" "otps" "portal_users" "rate_limits" "security_audit_log")
+    EXISTING_TABLES=$(${COMPOSE_CMD} exec -T db psql -U sewasetu -d sewasetu -t -c \
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "")
+    MISSING=()
+    for tbl in "${REQUIRED_TABLES[@]}"; do
+        if ! echo "$EXISTING_TABLES" | grep -qw "$tbl"; then
+            MISSING+=("$tbl")
+        fi
+    done
+    if [ ${#MISSING[@]} -eq 0 ]; then
+        pass "All 16 required database tables exist in PostgreSQL (including confirmation_tokens)"
+    else
+        fail "Missing required database tables: ${MISSING[*]}"
+    fi
+else
+    echo "  [INFO] Database container not active; skipped table check"
+fi
+
+# ------------------------------------------------------------------------------
+# 8. Scheduler Container Jobs Verification
+# ------------------------------------------------------------------------------
+echo "--- 8. Scheduler Container Jobs Verification ---"
+if command -v docker >/dev/null 2>&1 && ${COMPOSE_CMD} ps scheduler 2>/dev/null | grep -q "Up"; then
+    if ${COMPOSE_CMD} exec -T scheduler python /app/scripts/retention_cleanup.py >/dev/null 2>&1; then
+        pass "retention_cleanup.py executed successfully inside scheduler container"
+    else
+        fail "retention_cleanup.py execution failed inside scheduler container"
+    fi
+
+    if ${COMPOSE_CMD} exec -T scheduler python /app/scripts/deemed_approval.py >/dev/null 2>&1; then
+        pass "deemed_approval.py executed successfully inside scheduler container"
+    else
+        fail "deemed_approval.py execution failed inside scheduler container"
+    fi
+else
+    echo "  [INFO] Scheduler container not active; skipped job execution check"
+fi
+
 echo "=========================================================="
 if [ $FAILED -eq 0 ]; then
     echo " Deployment Verification PASSED (0 failures)"
